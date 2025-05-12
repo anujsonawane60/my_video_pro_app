@@ -13,6 +13,9 @@ from pydub import AudioSegment
 from pydub.silence import split_on_silence, detect_nonsilent
 import torch
 import assemblyai as aai  # Import AssemblyAI
+import noisereduce as nr  # Import noise reduction library
+import librosa  # Import librosa for audio processing
+import webrtcvad  # Import WebRTC Voice Activity Detection
 
 class VideoProcessor:
     """
@@ -35,6 +38,8 @@ class VideoProcessor:
         self.audio_path = os.path.join(self.output_dir, "extracted_audio.wav")
         self.subtitles_path = os.path.join(self.output_dir, "subtitles.srt")
         self.cleaned_audio_path = os.path.join(self.output_dir, "cleaned_audio.wav")
+        self.noise_reduced_audio_path = os.path.join(self.output_dir, "noise_reduced_audio.wav")
+        self.vad_cleaned_audio_path = os.path.join(self.output_dir, "vad_cleaned_audio.wav")
         self.final_video_path = os.path.join(self.output_dir, "final_video.mp4")
         
         # Transcription settings
@@ -44,6 +49,12 @@ class VideoProcessor:
         # Whisper model parameters
         self.whisper_model_size = whisper_model_size
         self.whisper_model = None
+        
+        # Audio cleaning settings
+        self.noise_reduction_enabled = True
+        self.vad_cleaning_enabled = True
+        self.vad_aggressiveness = 1  # Range 0-3, higher = more aggressive
+        self.noise_reduction_sensitivity = 0.2  # Default sensitivity
         
         # Verbose logging for debugging
         self.verbose = True
@@ -746,7 +757,7 @@ class VideoProcessor:
     
     def clean_audio(self) -> str:
         """
-        Clean the audio by removing filler words and sounds.
+        Clean the audio by applying noise reduction and removing filler words and sounds.
         
         Returns:
             Path to the cleaned audio file
@@ -755,23 +766,83 @@ class VideoProcessor:
         if not os.path.exists(self.audio_path):
             self.extract_audio()
         
-        # Load the audio
-        audio = AudioSegment.from_file(self.audio_path)
+        current_audio_path = self.audio_path
         
-        # Load the subtitles if they exist, otherwise generate them
-        if not os.path.exists(self.subtitles_path):
-            self.generate_subtitles()
+        # Apply noise reduction if enabled
+        if self.noise_reduction_enabled:
+            try:
+                print("Applying noise reduction...")
+                current_audio_path = self.reduce_noise(current_audio_path)
+            except Exception as e:
+                print(f"Error during noise reduction: {e}")
+                # Continue with original audio if noise reduction fails
         
-        # Parse the subtitles to identify filler words
-        filler_word_timestamps = self._find_filler_words_in_subtitles()
+        cleaned_audio_path = current_audio_path
         
-        # Remove the filler words from audio
-        cleaned_audio = self._remove_segments(audio, filler_word_timestamps)
+        # Apply filler word removal using different methods
+        if self.vad_cleaning_enabled:
+            try:
+                print("Applying VAD-based filler removal...")
+                cleaned_audio_path = self.remove_fillers_with_vad(current_audio_path)
+            except Exception as e:
+                print(f"Error during VAD-based filler removal: {e}")
+                # Fall back to traditional filler word removal if VAD fails
+                try:
+                    print("Falling back to subtitle-based filler word removal...")
+                    # Load the subtitles if they exist, otherwise generate them
+                    if not os.path.exists(self.subtitles_path):
+                        self.generate_subtitles()
+                    
+                    # Parse the subtitles to identify filler words
+                    filler_word_timestamps = self._find_filler_words_in_subtitles()
+                    
+                    # Only proceed if we found some filler words
+                    if filler_word_timestamps:
+                        # Load the audio
+                        audio = AudioSegment.from_file(current_audio_path)
+                        
+                        # Remove the filler words from audio
+                        cleaned_audio = self._remove_segments(audio, filler_word_timestamps)
+                        
+                        # Export the cleaned audio
+                        cleaned_audio.export(self.cleaned_audio_path, format="wav")
+                        cleaned_audio_path = self.cleaned_audio_path
+                except Exception as e2:
+                    print(f"Error during subtitle-based filler removal: {e2}")
+                    # Keep the noise-reduced audio if filler removal fails
+        else:
+            try:
+                # Traditional subtitle-based filler word removal
+                # Load the subtitles if they exist, otherwise generate them
+                if not os.path.exists(self.subtitles_path):
+                    self.generate_subtitles()
+                
+                # Parse the subtitles to identify filler words
+                filler_word_timestamps = self._find_filler_words_in_subtitles()
+                
+                # Only proceed if we found some filler words
+                if filler_word_timestamps:
+                    # Load the audio
+                    audio = AudioSegment.from_file(current_audio_path)
+                    
+                    # Remove the filler words from audio
+                    cleaned_audio = self._remove_segments(audio, filler_word_timestamps)
+                    
+                    # Export the cleaned audio
+                    cleaned_audio.export(self.cleaned_audio_path, format="wav")
+                    cleaned_audio_path = self.cleaned_audio_path
+            except Exception as e:
+                print(f"Error during subtitle-based filler removal: {e}")
+                # Keep the noise-reduced audio if filler removal fails
         
-        # Export the cleaned audio
-        cleaned_audio.export(self.cleaned_audio_path, format="wav")
+        # If no processing was done or all processing failed, copy original audio to cleaned path
+        if cleaned_audio_path == self.audio_path:
+            import shutil
+            shutil.copy2(self.audio_path, self.cleaned_audio_path)
+            cleaned_audio_path = self.cleaned_audio_path
         
-        return self.cleaned_audio_path
+        print(f"Audio cleaning complete. Final output at {cleaned_audio_path}")
+        return cleaned_audio_path
     
     def _find_filler_words_in_subtitles(self) -> List[Tuple[float, float]]:
         """
@@ -1347,4 +1418,188 @@ class VideoProcessor:
             self.video.close()
             shutil.rmtree(self.output_dir)
         except Exception as e:
-            print(f"Error during cleanup: {e}") 
+            print(f"Error during cleanup: {e}")
+    
+    def reduce_noise(self, audio_path: str = None) -> str:
+        """
+        Apply noise reduction to the audio file.
+        
+        Args:
+            audio_path: Path to the audio file to process, or use self.audio_path if None
+            
+        Returns:
+            Path to the noise-reduced audio file
+        """
+        if audio_path is None:
+            audio_path = self.audio_path
+            
+        # Check if audio has been extracted
+        if not os.path.exists(audio_path):
+            self.extract_audio()
+            audio_path = self.audio_path
+            
+        print(f"Applying noise reduction to {audio_path}")
+        
+        try:
+            # Load the audio file using librosa
+            audio, sr = librosa.load(audio_path, sr=None)
+            
+            # Apply noise reduction
+            print("Applying noise reduction algorithm...")
+            reduced_noise = nr.reduce_noise(
+                y=audio, 
+                sr=sr,
+                stationary=True,  # Assume stationary noise (constant background)
+                prop_decrease=self.noise_reduction_sensitivity
+            )
+            
+            # Save the processed audio
+            import soundfile as sf
+            sf.write(self.noise_reduced_audio_path, reduced_noise, sr)
+            
+            print(f"Noise reduction complete. Saved to {self.noise_reduced_audio_path}")
+            return self.noise_reduced_audio_path
+            
+        except Exception as e:
+            print(f"Error during noise reduction: {e}")
+            print(traceback.format_exc())
+            # Return original audio path if processing fails
+            return audio_path
+    
+    def remove_fillers_with_vad(self, audio_path: str = None) -> str:
+        """
+        Remove filler sounds and hesitations using Voice Activity Detection.
+        This is more sophisticated than the simple filler word detection.
+        
+        Args:
+            audio_path: Path to the audio file to process, or use self.audio_path if None
+            
+        Returns:
+            Path to the VAD-cleaned audio file
+        """
+        if audio_path is None:
+            audio_path = self.audio_path
+            
+        # Check if audio has been extracted
+        if not os.path.exists(audio_path):
+            self.extract_audio()
+            audio_path = self.audio_path
+            
+        print(f"Removing fillers with VAD from {audio_path}")
+        
+        try:
+            # Load the audio file using librosa (ensures 16kHz, which VAD requires)
+            audio, sr = librosa.load(audio_path, sr=16000)
+            
+            # Initialize VAD
+            vad = webrtcvad.Vad(self.vad_aggressiveness)
+            
+            # Set frame parameters
+            frame_duration = 30  # ms (typical values are 10, 20, 30 ms)
+            frame_size = int(sr * frame_duration / 1000)
+            
+            # Create frames from audio
+            frames = []
+            for i in range(0, len(audio) - frame_size, frame_size):
+                frame = audio[i:i + frame_size]
+                frames.append(frame)
+                
+            # Convert frames to PCM (for VAD)
+            pcm_frames = []
+            for frame in frames:
+                # Ensure the frame is the right size
+                if len(frame) == frame_size:
+                    # Scale to int16 range and convert to bytes
+                    pcm_frame = (frame * 32767).astype(np.int16).tobytes()
+                    pcm_frames.append(pcm_frame)
+            
+            # Process frames to find speech segments
+            speech_segments = []
+            is_speech = False
+            start_frame = 0
+            
+            # Parameters for VAD processing
+            min_speech_frames = 3  # Minimum frames for a speech segment (~90ms)
+            min_silence_frames = 5  # Minimum frames for a silence segment (~150ms)
+            speech_padding_frames = 2  # Padding frames around speech segments
+            
+            # First pass - simple VAD detection
+            frame_speech_status = []
+            for i, frame in enumerate(pcm_frames):
+                try:
+                    is_frame_speech = vad.is_speech(frame, sr)
+                    frame_speech_status.append(is_frame_speech)
+                except:
+                    # If frame processing fails, assume it's not speech
+                    frame_speech_status.append(False)
+            
+            # Second pass - apply minimum segment durations and padding
+            is_speech = False
+            speech_frame_count = 0
+            silence_frame_count = 0
+            
+            for i, is_frame_speech in enumerate(frame_speech_status):
+                if is_frame_speech:
+                    speech_frame_count += 1
+                    silence_frame_count = 0
+                    
+                    if not is_speech and speech_frame_count >= min_speech_frames:
+                        # Start a new speech segment
+                        is_speech = True
+                        # Include padding frames before, if possible
+                        start_frame = max(0, i - speech_padding_frames)
+                else:
+                    silence_frame_count += 1
+                    
+                    if is_speech and silence_frame_count >= min_silence_frames:
+                        # End the current speech segment
+                        is_speech = False
+                        end_frame = min(len(frame_speech_status), i + speech_padding_frames)
+                        
+                        # Convert frame indices to time
+                        start_time = start_frame * frame_duration / 1000  # in seconds
+                        end_time = end_frame * frame_duration / 1000  # in seconds
+                        
+                        speech_segments.append((start_time, end_time))
+                        speech_frame_count = 0
+            
+            # Handle the case where audio ends during speech
+            if is_speech:
+                end_frame = len(frame_speech_status)
+                start_time = start_frame * frame_duration / 1000
+                end_time = end_frame * frame_duration / 1000
+                speech_segments.append((start_time, end_time))
+            
+            print(f"Found {len(speech_segments)} speech segments")
+            
+            # Create a mask of speech regions
+            audio_duration = len(audio) / sr
+            mask = np.zeros(len(audio))
+            
+            for start_time, end_time in speech_segments:
+                # Convert time to sample indices
+                start_idx = int(start_time * sr)
+                end_idx = int(end_time * sr)
+                
+                # Ensure indices are within bounds
+                start_idx = max(0, start_idx)
+                end_idx = min(len(audio), end_idx)
+                
+                # Mark this region as speech
+                mask[start_idx:end_idx] = 1
+            
+            # Apply the mask to the audio
+            audio_masked = audio * mask
+            
+            # Save the processed audio
+            import soundfile as sf
+            sf.write(self.vad_cleaned_audio_path, audio_masked, sr)
+            
+            print(f"VAD-based filler removal complete. Saved to {self.vad_cleaned_audio_path}")
+            return self.vad_cleaned_audio_path
+            
+        except Exception as e:
+            print(f"Error during VAD-based filler removal: {e}")
+            print(traceback.format_exc())
+            # Return original audio path if processing fails
+            return audio_path 

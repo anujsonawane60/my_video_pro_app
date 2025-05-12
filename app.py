@@ -112,6 +112,30 @@ with st.sidebar:
             type="password"
         )
     
+    # Audio Cleaning Settings
+    st.subheader("Audio Cleaning")
+    enable_noise_reduction = st.checkbox("Enable Noise Reduction", value=True)
+    
+    if enable_noise_reduction:
+        noise_reduction_sensitivity = st.slider(
+            "Noise Reduction Sensitivity",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.2,
+            step=0.05,
+            help="Higher values remove more noise but may affect speech quality"
+        )
+    
+    enable_vad_cleaning = st.checkbox("Use Advanced Filler Removal (VAD)", value=True)
+    
+    if enable_vad_cleaning:
+        vad_aggressiveness = st.select_slider(
+            "VAD Aggressiveness",
+            options=[0, 1, 2, 3],
+            value=1,
+            help="Higher values are more aggressive at detecting speech (0=least, 3=most)"
+        )
+    
     # Show debug logs option
     st.subheader("Debug Options")
     show_logs = st.checkbox("Show Debug Logs")
@@ -153,6 +177,17 @@ with main_col1:
                 whisper_model_size=whisper_model_size,
                 use_assemblyai=False
             )
+        
+        # Set audio cleaning options
+        if 'enable_noise_reduction' in locals():
+            st.session_state.processor.noise_reduction_enabled = enable_noise_reduction
+            if enable_noise_reduction and 'noise_reduction_sensitivity' in locals():
+                st.session_state.processor.noise_reduction_sensitivity = noise_reduction_sensitivity
+        
+        if 'enable_vad_cleaning' in locals():
+            st.session_state.processor.vad_cleaning_enabled = enable_vad_cleaning
+            if enable_vad_cleaning and 'vad_aggressiveness' in locals():
+                st.session_state.processor.vad_aggressiveness = vad_aggressiveness
         
         # Show uploaded video
         st.video(video_path)

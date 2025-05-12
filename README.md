@@ -3,7 +3,7 @@
 A video processing application built with Streamlit that enables users to:
 1. Extract audio from videos
 2. Generate subtitles automatically using either local Whisper AI or cloud-based AssemblyAI
-3. Clean audio by removing filler words like "umm", "uhh", etc.
+3. Clean audio by removing background noise and filler words like "umm", "uhh", etc.
 4. Create a final video with clean audio and subtitles
 
 ## Features
@@ -13,7 +13,10 @@ A video processing application built with Streamlit that enables users to:
 - **Multiple transcription options**: 
   - Local transcription with Whisper AI (no API key needed)
   - Cloud-based transcription with AssemblyAI (requires API key)
-- **Audio cleaning**: Removes common filler words to create cleaner audio
+- **Advanced audio cleaning**:
+  - **Noise reduction**: Reduces background noise for clearer audio
+  - **Filler word removal**: Identifies and removes common filler words ("umm", "uh", etc.)
+  - **Voice Activity Detection (VAD)**: Advanced method to identify and keep only speech segments
 - **Instant preview**: Preview and download at each processing step
 - **Diagnostic tools**: Test transcription options to ensure proper functionality
 
@@ -42,6 +45,7 @@ A video processing application built with Streamlit that enables users to:
 3. Follow the step-by-step interface:
    - Upload a video file
    - Select transcription method (Whisper or AssemblyAI)
+   - Configure audio cleaning options (noise reduction sensitivity, VAD aggressiveness)
    - Extract audio
    - Generate subtitles
    - Clean audio
@@ -63,6 +67,9 @@ The application uses:
 - **PyDub**: For audio processing
 - **Whisper AI**: For local speech-to-text transcription
 - **AssemblyAI**: For cloud-based speech-to-text transcription (requires API key)
+- **NoiseReduce**: For background noise reduction
+- **WebRTC VAD**: For advanced voice activity detection
+- **Librosa**: For advanced audio processing
 
 ## Project Structure
 
