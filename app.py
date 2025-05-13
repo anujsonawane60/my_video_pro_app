@@ -6,6 +6,10 @@ import shutil
 from video_processor import VideoProcessor
 import torch
 import assemblyai as aai
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import numpy as np
 
 # Set page configuration
 st.set_page_config(
@@ -79,6 +83,19 @@ def safe_copy_file(source_path, file_type):
     except Exception as e:
         add_log(f"Error copying file: {e}")
     return None
+
+# Function to display audio waveform
+def display_waveform(audio_path):
+    try:
+        y, sr = librosa.load(audio_path)
+        fig, ax = plt.subplots()
+        librosa.display.waveshow(y, sr=sr, ax=ax)
+        ax.set(title='Audio Waveform')
+        ax.label_outer()
+        st.pyplot(fig)
+    except Exception as e:
+        st.error(f"Error displaying waveform: {e}")
+        add_log(f"Error displaying waveform: {e}")
 
 # Main title
 st.title("🎬 Video Processing App")
@@ -155,12 +172,12 @@ with st.sidebar:
     st.subheader("Debug Options")
     show_logs = st.checkbox("Show Debug Logs", value=True)
     debug_mode = st.checkbox("Enable Debug Mode", value=True,
-                                help="Enable detailed logs to diagnose issues")
+                                 help="Enable detailed logs to diagnose issues")
 
     # Advanced options expander for Video Creation
     with st.expander("Video Creation Settings", expanded=False):
         use_direct_ffmpeg = st.checkbox("Use Direct FFmpeg Method", value=True,
-                                        help="Use FFmpeg directly for more reliable video creation")
+                                             help="Use FFmpeg directly for more reliable video creation")
 
         font_size = st.slider("Subtitle Font Size", 18, 36, 24)
 
@@ -275,6 +292,7 @@ with main_col1:
                 try:
                     # Use saved audio path instead of temporary one
                     st.audio(st.session_state.saved_audio_path)
+                    display_waveform(st.session_state.saved_audio_path)
                 except Exception as e:
                     st.error(f"Error playing audio: {str(e)}")
                     add_log(f"Error playing audio: {str(e)}")
@@ -370,6 +388,7 @@ with main_col1:
                     try:
                         # Use saved clean audio path
                         st.audio(st.session_state.saved_cleaned_audio_path)
+                        display_waveform(st.session_state.saved_cleaned_audio_path)
                     except Exception as e:
                         st.error(f"Error playing cleaned audio: {str(e)}")
                         add_log(f"Error playing cleaned audio: {str(e)}")
