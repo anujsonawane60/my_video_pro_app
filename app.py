@@ -71,7 +71,7 @@ def safe_copy_file(source_path, file_type):
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             new_filename = f"{file_type}_{timestamp}{ext}"
             destination = os.path.join(output_dir, new_filename)
-            
+
             # Copy the file
             shutil.copy2(source_path, destination)
             add_log(f"Copied {file_type} to {destination}")
@@ -87,17 +87,28 @@ st.write("Upload a video and process it with subtitles and clean audio")
 # Sidebar for settings
 with st.sidebar:
     st.title("Settings")
-    
+
     # Transcription method selection
     st.subheader("Transcription Method")
     transcription_method = st.radio(
         "Select method:",
         ["Whisper (Local)", "AssemblyAI (Cloud)"]
     )
-    
+
     # Set variables based on selection
     use_assemblyai = transcription_method == "AssemblyAI (Cloud)"
-    
+
+    # Language selection
+    st.subheader("Language")
+    language = st.selectbox(
+        "Select language:",
+        ["English", "Marathi"],
+        index=0
+    )
+
+    # Map language selection to language code
+    language_code = "en" if language == "English" else "mr"
+
     # Model selection for Whisper
     if not use_assemblyai:
         st.subheader("Whisper Settings")
@@ -106,20 +117,20 @@ with st.sidebar:
             ["tiny", "base", "small", "medium"],
             index=1
         )
-    
+
     # API key for AssemblyAI
     if use_assemblyai:
         st.subheader("AssemblyAI Settings")
         assemblyai_api_key = st.text_input(
             "API Key",
-            value="7c38a180f4304cef8eb639f3745a6f33",
+            value="YOUR_ASSEMBLYAI_API_KEY",  # Replace with your actual API key
             type="password"
         )
-    
+
     # Audio Cleaning Settings
     st.subheader("Audio Cleaning")
     enable_noise_reduction = st.checkbox("Enable Noise Reduction", value=True)
-    
+
     if enable_noise_reduction:
         noise_reduction_sensitivity = st.slider(
             "Noise Reduction Sensitivity",
@@ -129,9 +140,9 @@ with st.sidebar:
             step=0.05,
             help="Higher values remove more noise but may affect speech quality"
         )
-    
+
     enable_vad_cleaning = st.checkbox("Use Advanced Filler Removal (VAD)", value=True)
-    
+
     if enable_vad_cleaning:
         vad_aggressiveness = st.select_slider(
             "VAD Aggressiveness",
@@ -139,30 +150,30 @@ with st.sidebar:
             value=1,
             help="Higher values are more aggressive at detecting speech (0=least, 3=most)"
         )
-    
+
     # Show debug logs option
     st.subheader("Debug Options")
     show_logs = st.checkbox("Show Debug Logs", value=True)
-    debug_mode = st.checkbox("Enable Debug Mode", value=True, 
-                           help="Enable detailed logs to diagnose issues")
-    
+    debug_mode = st.checkbox("Enable Debug Mode", value=True,
+                                help="Enable detailed logs to diagnose issues")
+
     # Advanced options expander for Video Creation
     with st.expander("Video Creation Settings", expanded=False):
-        use_direct_ffmpeg = st.checkbox("Use Direct FFmpeg Method", value=True, 
-                                     help="Use FFmpeg directly for more reliable video creation")
-        
+        use_direct_ffmpeg = st.checkbox("Use Direct FFmpeg Method", value=True,
+                                        help="Use FFmpeg directly for more reliable video creation")
+
         font_size = st.slider("Subtitle Font Size", 18, 36, 24)
-        
+
         subtitle_color = st.selectbox(
             "Subtitle Text Color",
             ["white", "yellow", "cyan"],
             index=0
         )
-        
+
         subtitle_bg_opacity = st.slider(
-            "Subtitle Background Opacity", 
-            min_value=0, 
-            max_value=100, 
+            "Subtitle Background Opacity",
+            min_value=0,
+            max_value=100,
             value=80
         )
 
@@ -173,7 +184,7 @@ with main_col1:
     # Video upload section
     st.subheader("Upload Video")
     uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
-    
+
     # If a file is uploaded
     if uploaded_file is not None:
         # Save to a persistent location
@@ -181,42 +192,47 @@ with main_col1:
         file_ext = os.path.splitext(uploaded_file.name)[1]
         video_filename = f"input_video_{upload_time}{file_ext}"
         video_path = os.path.join(output_dir, video_filename)
-        
+
         with open(video_path, "wb") as f:
             f.write(uploaded_file.getvalue())
-        
+
         # Store file path
         st.session_state.temp_video_path = video_path
         add_log(f"Saved uploaded video to {video_path}")
-        
+
         # Initialize processor
         if use_assemblyai:
+            if not assemblyai_api_key or assemblyai_api_key == "YOUR_ASSEMBLYAI_API_KEY":
+                st.error("Please enter your AssemblyAI API key in the sidebar settings.")
+                st.stop()
             st.session_state.processor = VideoProcessor(
                 video_path,
                 whisper_model_size="base",
                 use_assemblyai=True,
                 assemblyai_api_key=assemblyai_api_key,
-                debug_mode=debug_mode
+                debug_mode=debug_mode,
+                language=language_code
             )
         else:
             st.session_state.processor = VideoProcessor(
                 video_path,
                 whisper_model_size=whisper_model_size,
                 use_assemblyai=False,
-                debug_mode=debug_mode
+                debug_mode=debug_mode,
+                language=language_code
             )
-        
+
         # Set audio cleaning options
         if 'enable_noise_reduction' in locals():
             st.session_state.processor.noise_reduction_enabled = enable_noise_reduction
             if enable_noise_reduction and 'noise_reduction_sensitivity' in locals():
                 st.session_state.processor.noise_reduction_sensitivity = noise_reduction_sensitivity
-        
+
         if 'enable_vad_cleaning' in locals():
             st.session_state.processor.vad_cleaning_enabled = enable_vad_cleaning
             if enable_vad_cleaning and 'vad_aggressiveness' in locals():
                 st.session_state.processor.vad_aggressiveness = vad_aggressiveness
-        
+
         # Set subtitle options
         if 'font_size' in locals():
             st.session_state.processor.subtitle_font_size = font_size
@@ -226,13 +242,13 @@ with main_col1:
             st.session_state.processor.subtitle_bg_opacity = subtitle_bg_opacity
         if 'use_direct_ffmpeg' in locals():
             st.session_state.processor.use_direct_ffmpeg = use_direct_ffmpeg
-        
+
         # Show uploaded video
         st.video(video_path)
-        
+
         # Processing steps
         st.subheader("Processing Steps")
-        
+
         # Step 1: Extract Audio
         step1_col1, step1_col2 = st.columns([1, 2])
         with step1_col1:
@@ -241,7 +257,7 @@ with main_col1:
                     try:
                         add_log("Starting audio extraction")
                         audio_path = st.session_state.processor.extract_audio()
-                        
+
                         # Copy audio to output directory
                         saved_path = safe_copy_file(audio_path, "audio")
                         if saved_path:
@@ -253,7 +269,7 @@ with main_col1:
                     except Exception as e:
                         st.error(f"Error: {str(e)}")
                         add_log(f"Error: {str(e)}")
-        
+
         with step1_col2:
             if st.session_state.current_step >= 1 and st.session_state.saved_audio_path:
                 try:
@@ -262,73 +278,71 @@ with main_col1:
                 except Exception as e:
                     st.error(f"Error playing audio: {str(e)}")
                     add_log(f"Error playing audio: {str(e)}")
-        
-        # Step 2: Generate Subtitles
+
+        # Step 2: Generate and Edit Subtitles
         if st.session_state.current_step >= 1:
-            step2_col1, step2_col2 = st.columns([1, 2])
-            with step2_col1:
-                if st.button("2. Generate Subtitles"):
-                    with st.spinner("Generating subtitles... This may take a while"):
-                        try:
-                            add_log("Starting subtitle generation")
-                            subtitle_path = st.session_state.processor.generate_subtitles()
-                            
-                            # Copy subtitle file to output directory
-                            saved_path = safe_copy_file(subtitle_path, "subtitles")
-                            if saved_path:
-                                st.session_state.saved_subtitle_path = saved_path
-                                st.session_state.current_step = 2
-                                st.success("Subtitles generated!")
-                            else:
-                                st.error("Failed to save subtitles")
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
-                            add_log(f"Error: {str(e)}")
-            
-            with step2_col2:
-                if st.session_state.current_step >= 2 and st.session_state.saved_subtitle_path:
+            st.subheader("2. Generate and Edit Subtitles")
+            if st.button("Generate Subtitles"):
+                with st.spinner("Generating subtitles... This may take a while"):
                     try:
-                        # Show subtitle preview from saved file
-                        with open(st.session_state.saved_subtitle_path, 'r', encoding='utf-8') as f:
-                            subtitle_content = f.read()
-                        
-                        # Display the original subtitles (read-only)
-                        st.subheader("Original Subtitles (Read-only)")
-                        st.text_area("Original Subtitles", subtitle_content, height=250, disabled=True, key="original_subtitles")
-                        
-                        # Initialize editable subtitles in session state if not already present
-                        if "editable_subtitles" not in st.session_state:
-                            st.session_state.editable_subtitles = subtitle_content
-                        
-                        # Display editable subtitles
-                        st.subheader("Editable Subtitles")
+                        add_log("Starting subtitle generation")
+                        subtitle_path = st.session_state.processor.generate_subtitles()
+
+                        # Copy subtitle file to output directory
+                        saved_path = safe_copy_file(subtitle_path, "subtitles")
+                        if saved_path:
+                            st.session_state.saved_subtitle_path = saved_path
+                            st.session_state.current_step = 2
+                            st.success("Subtitles generated!")
+                        else:
+                            st.error("Failed to save subtitles")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+                        add_log(f"Error: {str(e)}")
+
+            if st.session_state.current_step >= 2 and st.session_state.saved_subtitle_path:
+                try:
+                    # Show subtitle preview from saved file
+                    with open(st.session_state.saved_subtitle_path, 'r', encoding='utf-8') as f:
+                        subtitle_content = f.read()
+
+                    # Create two columns for original and editable subtitles
+                    sub_col1, sub_col2 = st.columns(2)
+
+                    with sub_col1:
+                        st.subheader("Original Subtitles")
+                        st.text_area("Original", subtitle_content, height=300, disabled=True, key="original_subtitles")
+
+                    with sub_col2:
+                        st.subheader("Edit Subtitles")
                         st.session_state.editable_subtitles = st.text_area(
-                            "Edit Subtitles", 
-                            st.session_state.editable_subtitles, 
+                            "Editable",
+                            subtitle_content,
                             height=300,
                             key="editable_subtitle_area"
                         )
-                        
+
                         # Add button to save edited subtitles
                         if st.button("Save Edited Subtitles"):
                             try:
                                 # Generate a filename for edited subtitles
                                 edited_subtitle_path = os.path.join(output_dir, f"edited_subtitles_{time.strftime('%Y%m%d_%H%M%S')}.srt")
-                                
+
                                 # Save the edited subtitles
                                 with open(edited_subtitle_path, 'w', encoding='utf-8') as f:
                                     f.write(st.session_state.editable_subtitles)
-                                
+
                                 # Store the path in session state for use in video creation
                                 st.session_state.edited_subtitle_path = edited_subtitle_path
                                 st.success(f"Edited subtitles saved to {edited_subtitle_path}")
                             except Exception as e:
                                 st.error(f"Error saving edited subtitles: {str(e)}")
                                 add_log(f"Error saving edited subtitles: {str(e)}")
-                    except Exception as e:
-                        st.error(f"Error displaying subtitles: {str(e)}")
-                        add_log(f"Error displaying subtitles: {str(e)}")
-        
+
+                except Exception as e:
+                    st.error(f"Error displaying subtitles: {str(e)}")
+                    add_log(f"Error displaying subtitles: {str(e)}")
+
         # Step 3: Clean Audio
         if st.session_state.current_step >= 2:
             step3_col1, step3_col2 = st.columns([1, 2])
@@ -338,7 +352,7 @@ with main_col1:
                         try:
                             add_log("Starting audio cleaning")
                             cleaned_audio_path = st.session_state.processor.clean_audio()
-                            
+
                             # Copy cleaned audio to output directory
                             saved_path = safe_copy_file(cleaned_audio_path, "cleaned_audio")
                             if saved_path:
@@ -350,7 +364,7 @@ with main_col1:
                         except Exception as e:
                             st.error(f"Error: {str(e)}")
                             add_log(f"Error: {str(e)}")
-            
+
             with step3_col2:
                 if st.session_state.current_step >= 3 and st.session_state.saved_cleaned_audio_path:
                     try:
@@ -359,7 +373,7 @@ with main_col1:
                     except Exception as e:
                         st.error(f"Error playing cleaned audio: {str(e)}")
                         add_log(f"Error playing cleaned audio: {str(e)}")
-        
+
         # Step 4: Create Final Video
         if st.session_state.current_step >= 3:
             step4_col1, step4_col2 = st.columns([1, 1])
@@ -368,11 +382,11 @@ with main_col1:
                     with st.spinner("Creating final video with subtitles and clean audio..."):
                         try:
                             add_log("Creating final video")
-                            
+
                             # Show progress message
                             progress_placeholder = st.empty()
                             progress_placeholder.info("Step 1/3: Checking for required files...")
-                            
+
                             # Check for required files
                             video_path_ok = os.path.exists(st.session_state.temp_video_path)
                             audio_path_ok = False
@@ -512,4 +526,17 @@ if uploaded_file is None:
     3. Generate subtitles using Whisper AI or AssemblyAI
     4. Clean the audio by removing filler words
     5. Create a final video with clean audio and subtitles
+    """) 
+    
+    # Show language support information
+    st.subheader("Language Support")
+    st.write("""
+    This app supports generating subtitles in:
+    - English (Default)
+    - Marathi (मराठी)
+    
+    **For Marathi videos:**
+    - Select 'Marathi' from the language dropdown in the settings sidebar
+    - The app uses advanced chunking with OpenAI Whisper for better Marathi recognition
+    - For best results, use clear audio with minimal background noise
     """) 

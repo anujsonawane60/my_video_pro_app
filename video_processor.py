@@ -17,6 +17,7 @@ import noisereduce as nr  # Import noise reduction library
 import librosa  # Import librosa for audio processing
 import webrtcvad  # Import WebRTC Voice Activity Detection
 import pysrt  # Import pysrt for subtitle handling
+import speech_recognition as sr
 
 class VideoProcessor:
     """
@@ -25,7 +26,7 @@ class VideoProcessor:
     """
     
     def __init__(self, video_path: str, whisper_model_size: str = "base", use_assemblyai: bool = False, 
-                 assemblyai_api_key: str = None, debug_mode: bool = False):
+                 assemblyai_api_key: str = None, debug_mode: bool = False, language: str = "en"):
         """
         Initialize the VideoProcessor with a video file.
         
@@ -35,6 +36,7 @@ class VideoProcessor:
             use_assemblyai: Whether to use AssemblyAI instead of Whisper
             assemblyai_api_key: API key for AssemblyAI (required if use_assemblyai is True)
             debug_mode: Whether to enable detailed debug logging
+            language: Language code for transcription (e.g., "en" for English, "mr" for Marathi)
         """
         self.video_path = video_path
         self.output_dir = self._create_output_dir()
@@ -48,6 +50,7 @@ class VideoProcessor:
         # Transcription settings
         self.use_assemblyai = use_assemblyai
         self.assemblyai_api_key = assemblyai_api_key
+        self.language = language
         
         # Whisper model parameters
         self.whisper_model_size = whisper_model_size
@@ -72,8 +75,18 @@ class VideoProcessor:
         # Load the video file
         self.video = VideoFileClip(video_path)
         
-        # Filler words to remove
+        # Filler words to remove based on language
         self.filler_words = ["um", "uh", "hmm", "uhh", "err", "ah", "like", "you know"]
+        
+        # Add Marathi filler words if language is Marathi
+        if self.language == "mr":
+            # Common Marathi filler words and sounds
+            self.filler_words = ["अं", "हं", "म्हणजे", "असं", "तसं", "आता", "बघा", "ते", "असेल तर", "आणि", "तर", "नंतर"]
+            
+            # Use larger model for Marathi if not specified otherwise
+            if self.whisper_model_size == "base" or self.whisper_model_size == "tiny":
+                print("Using 'small' model for better Marathi transcription accuracy")
+                self.whisper_model_size = "small"
         
         # Log initialization
         if self.debug_mode:
@@ -82,6 +95,7 @@ class VideoProcessor:
             print(f"  Output directory: {self.output_dir}")
             print(f"  Whisper model: {whisper_model_size}")
             print(f"  Use AssemblyAI: {use_assemblyai}")
+            print(f"  Language: {language}")
             print(f"  Video duration: {self.video.duration} seconds")
             print(f"  Video resolution: {self.video.size}")
             print(f"  Audio track present: {self.video.audio is not None}")
@@ -227,7 +241,7 @@ class VideoProcessor:
                     "whisper", 
                     self.audio_path, 
                     "--model", self.whisper_model_size,
-                    "--language", "en",
+                    "--language", self.language,
                     "--output_dir", self.output_dir,
                     "--output_format", "srt"
                 ]
@@ -301,7 +315,7 @@ class VideoProcessor:
                 speech_model=aai.SpeechModel.best,  # Use the best model for accuracy
                 punctuate=True,                     # Add punctuation
                 format_text=True,                   # Format text with proper casing
-                language_code="en"                  # Use English
+                language_code=self.language         # Use specified language
             )
             
             # Create the transcriber with the configuration
@@ -427,8 +441,80 @@ class VideoProcessor:
         success = False
         
         try:
-            # Use AssemblyAI if specified
-            if self.use_assemblyai:
+            # Check if language is Marathi and use specialized approach
+            if self.language == "mr":
+                print("Marathi language detected, using specialized Marathi transcription...")
+                
+                # For Marathi, try multiple approaches
+                print("Attempt 1: Using optimized chunking approach for Marathi")
+                success = self._transcribe_marathi_with_chunking()
+                
+                # Check if we got successful Marathi transcription
+                if success:
+                    try:
+                        with open(self.subtitles_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            # Look for Marathi characters
+                            if len(content) > 100 and any(ord(c) > 2304 and ord(c) < 2432 for c in content):
+                                print("Marathi characters detected in subtitles, returning result")
+                                return self.subtitles_path
+                            else:
+                                print("No Marathi characters detected, trying another approach")
+                                success = False
+                    except Exception as e:
+                        print(f"Error checking Marathi content: {e}")
+                
+                # If first approach failed, try command line approach
+                if not success:
+                    print("Attempt 2: Using command line approach for Marathi")
+                    success = self._direct_marathi_transcribe_with_command_line()
+                    
+                    # Check if command line approach worked
+                    if success:
+                        try:
+                            with open(self.subtitles_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                                # Look for Marathi characters
+                                if len(content) > 100 and any(ord(c) > 2304 and ord(c) < 2432 for c in content):
+                                    print("Marathi characters detected in subtitles from command line approach, returning result")
+                                    return self.subtitles_path
+                                else:
+                                    print("No Marathi characters detected, trying another approach")
+                                    success = False
+                        except Exception as e:
+                            print(f"Error checking Marathi content: {e}")
+                
+                # If above approaches failed, try standard Whisper API with Marathi settings
+                if not success:
+                    print("Attempt 3: Using standard Whisper API with Marathi settings")
+                    
+                    # Ensure we try with a good model for Marathi
+                    if self.whisper_model_size in ["tiny", "base"]:
+                        print("Using 'small' model for better accuracy with Marathi")
+                        prev_size = self.whisper_model_size
+                        self.whisper_model_size = "small"
+                        self.whisper_model = None  # Force reload
+                    
+                    success = self._generate_subtitles_with_api()
+                    
+                    # If we got successful transcription, check for Marathi content
+                    if success:
+                        try:
+                            with open(self.subtitles_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                                # Look for Marathi characters
+                                if len(content) > 100 and any(ord(c) > 2304 and ord(c) < 2432 for c in content):
+                                    print("Marathi characters detected in subtitles from standard API, returning result")
+                                    return self.subtitles_path
+                        except Exception as e:
+                            print(f"Error checking Marathi content: {e}")
+                
+                # If all Marathi-specific approaches failed, continue with standard approaches
+                if not success:
+                    print("All Marathi-specific approaches failed, trying standard transcription...")
+            
+            # Use AssemblyAI if specified (but not for Marathi)
+            if self.use_assemblyai and self.language != "mr":
                 print("Using AssemblyAI for transcription...")
                 success = self._generate_subtitles_with_assemblyai()
                 
@@ -564,7 +650,7 @@ class VideoProcessor:
                     # Transcribe this chunk
                     result = model.transcribe(
                         chunk_audio,
-                        language="en"
+                        language=self.language
                     )
                     
                     # Adjust timestamps to account for chunk position
@@ -663,7 +749,7 @@ class VideoProcessor:
             
             # Simple transcription approach
             print(f"Transcribing audio with {self.whisper_model_size} model...")
-            result = model.transcribe(audio_data, language="en")
+            result = model.transcribe(audio_data, language=self.language)
             
             # Check if result contains text
             if not result or "text" not in result or not result["text"]:
@@ -916,7 +1002,7 @@ class VideoProcessor:
             
             # Set up options including word timestamps
             options = {
-                "language": "en", 
+                "language": self.language, 
                 "word_timestamps": True,
                 "fp16": False
             }
@@ -1524,4 +1610,267 @@ class VideoProcessor:
             print(f"Error during VAD-based filler removal: {e}")
             print(traceback.format_exc())
             # Return original audio path if processing fails
-            return audio_path 
+            return audio_path
+    
+    def _transcribe_with_speech_recognition(self) -> bool:
+        """
+        Use SpeechRecognition library to transcribe Marathi or other languages.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"Transcribing audio using SpeechRecognition with language: {self.language}")
+            
+            # Check the audio length
+            audio_duration = self.video.duration
+            
+            # For longer videos, use chunking approach for better results
+            if audio_duration > 30:  # If longer than 30 seconds
+                print(f"Long audio detected ({audio_duration:.2f}s), using chunking approach")
+                if self.language == "mr":
+                    return self._transcribe_marathi_with_chunking()
+            
+            # For shorter videos or if chunking failed, use the simple approach
+            r = sr.Recognizer()
+            with sr.AudioFile(self.audio_path) as source:
+                audio = r.record(source)
+            
+            # Initialize segments list
+            segments = []
+            
+            # For full audio (this would need to be chunked for long files)
+            try:
+                # Use whisper API from SpeechRecognition for Marathi
+                text = r.recognize_whisper(audio, language=self.language)
+                
+                # Create a basic segment (this is simplified)
+                segment = {
+                    "start": 0,
+                    "end": self.video.duration,
+                    "text": text
+                }
+                segments.append(segment)
+                
+                # Write segments to SRT file
+                with open(self.subtitles_path, 'w', encoding='utf-8') as f:
+                    self._write_simple_srt(segments, f)
+                
+                print(f"Successfully transcribed audio to {self.subtitles_path}")
+                return True
+                
+            except sr.UnknownValueError:
+                print("Speech Recognition could not understand audio")
+            except sr.RequestError as e:
+                print(f"Speech Recognition error: {e}")
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error in SpeechRecognition transcription: {e}")
+            traceback.print_exc()
+            return False
+    
+    def _transcribe_marathi_with_chunking(self) -> bool:
+        """
+        Transcribe Marathi audio by splitting it into smaller chunks for better accuracy.
+        Uses Whisper directly for better Marathi language support.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print(f"Transcribing Marathi audio with improved chunking...")
+            
+            # Load audio using pydub
+            audio = AudioSegment.from_file(self.audio_path)
+            duration_ms = len(audio)
+            
+            # Define chunk size (30 seconds seems to work well for Marathi)
+            chunk_size_ms = 30 * 1000
+            
+            # Create temp directory for chunks
+            chunks_dir = os.path.join(self.output_dir, "marathi_chunks")
+            os.makedirs(chunks_dir, exist_ok=True)
+            
+            # Split audio into chunks
+            chunks = []
+            for i in range(0, len(audio), chunk_size_ms):
+                chunk = audio[i:min(i + chunk_size_ms, len(audio))]
+                chunk_path = os.path.join(chunks_dir, f"chunk_{i//chunk_size_ms}.wav")
+                chunk.export(chunk_path, format="wav")
+                chunks.append({
+                    "path": chunk_path,
+                    "start_ms": i,
+                    "end_ms": min(i + chunk_size_ms, len(audio))
+                })
+            
+            print(f"Split audio into {len(chunks)} chunks for Marathi transcription")
+            
+            # Load Whisper model specifically for Marathi
+            print("Loading Whisper model for Marathi transcription...")
+            model_size = "small"  # Using small model for better accuracy with Marathi
+            try:
+                model = whisper.load_model(model_size)
+            except Exception as e:
+                print(f"Error loading 'small' model: {e}")
+                model = whisper.load_model("base")
+            
+            # Process each chunk
+            all_segments = []
+            
+            for i, chunk in enumerate(chunks):
+                print(f"Processing Marathi chunk {i+1}/{len(chunks)}...")
+                
+                try:
+                    # Load audio for Whisper
+                    chunk_audio = self._load_audio_for_whisper(chunk["path"])
+                    
+                    # Use specific Marathi transcription settings
+                    result = model.transcribe(
+                        chunk_audio,
+                        language="mr",
+                        task="transcribe",
+                        fp16=False,
+                        verbose=True
+                    )
+                    
+                    # Calculate timestamps
+                    offset_ms = chunk["start_ms"]
+                    offset_sec = offset_ms / 1000
+                    
+                    if "segments" in result:
+                        for segment in result["segments"]:
+                            # Add offset to start and end times
+                            segment["start"] += offset_sec
+                            segment["end"] += offset_sec
+                            all_segments.append(segment)
+                    elif "text" in result and result["text"]:
+                        # Create a single segment if no segments are returned
+                        segment = {
+                            "start": offset_sec,
+                            "end": offset_sec + (chunk["end_ms"] - chunk["start_ms"]) / 1000,
+                            "text": result["text"]
+                        }
+                        all_segments.append(segment)
+                    
+                except Exception as e:
+                    print(f"Error processing Marathi chunk {i+1}: {e}")
+            
+            # If we got some segments, write them to SRT
+            if all_segments:
+                # Sort segments by start time
+                all_segments.sort(key=lambda x: x["start"])
+                
+                # Write to SRT file
+                with open(self.subtitles_path, "w", encoding="utf-8") as f:
+                    self._write_simple_srt(all_segments, f)
+                
+                # Verify file has content
+                if os.path.getsize(self.subtitles_path) > 100:
+                    print(f"Successfully wrote Marathi subtitles to {self.subtitles_path}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error in Marathi chunked transcription: {e}")
+            traceback.print_exc()
+            return False
+    
+    def _direct_marathi_transcribe_with_command_line(self) -> bool:
+        """
+        Try transcribing Marathi audio using the command line whisper tool as a fallback.
+        This can work better in some cases than the Python API.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            print("Attempting Marathi transcription using command line whisper...")
+            
+            # Check if command line whisper is installed
+            try:
+                result = subprocess.run(
+                    ["whisper", "--help"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5  # Timeout after 5 seconds
+                )
+                if result.returncode != 0:
+                    print("Command line whisper not properly installed.")
+                    return False
+            except (subprocess.SubprocessError, FileNotFoundError):
+                print("Command line whisper not installed or not in PATH.")
+                return False
+            
+            # Set device flag based on availability
+            device_flag = "--device cuda" if torch.cuda.is_available() else "--device cpu"
+            
+            # For Marathi, always use the small model or larger
+            model_to_use = "small"
+            if self.whisper_model_size in ["medium", "large"]:
+                model_to_use = self.whisper_model_size
+            
+            # Try to execute whisper command line with timeout and proper error handling
+            try:
+                cmd = [
+                    "whisper", 
+                    self.audio_path, 
+                    "--model", model_to_use,
+                    "--language", "mr",  # Explicitly specify Marathi
+                    "--output_dir", self.output_dir,
+                    "--output_format", "srt",
+                    "--task", "transcribe",  # Explicitly set task to transcribe
+                    "--verbose", "True"  # Get more info for debugging
+                ]
+                
+                # Add device flag
+                cmd.extend(device_flag.split())
+                
+                print(f"Running command for Marathi: {' '.join(cmd)}")
+                
+                # Set a reasonable timeout based on audio length and model size
+                timeout = max(300, int(self.video.duration * 2))  # At least 5 minutes, but longer for Marathi
+                
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=timeout
+                )
+                
+                # Check if process succeeded
+                if result.returncode != 0:
+                    print(f"Command failed with exit code {result.returncode}")
+                    print(f"Error output: {result.stderr}")
+                    return False
+                
+                print(f"Command output: {result.stdout}")
+                
+            except subprocess.TimeoutExpired:
+                print(f"Command timed out after {timeout} seconds")
+                return False
+            except Exception as e:
+                print(f"Command execution failed: {e}")
+                return False
+            
+            # Check for output file (may have a different name)
+            srt_files = [f for f in os.listdir(self.output_dir) if f.endswith('.srt')]
+            if srt_files:
+                generated_srt = os.path.join(self.output_dir, srt_files[0])
+                if os.path.exists(generated_srt) and os.path.getsize(generated_srt) > 0:
+                    # Copy to the expected subtitles path
+                    with open(generated_srt, 'r', encoding='utf-8') as src, open(self.subtitles_path, 'w', encoding='utf-8') as dst:
+                        dst.write(src.read())
+                    print("Command line Marathi transcription successful!")
+                    return True
+            
+            print("Command line Marathi transcription attempt did not produce usable subtitles.")
+            return False
+            
+        except Exception as e:
+            print(f"Command line Marathi transcription failed: {e}")
+            return False 

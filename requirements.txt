@@ -15,3 +15,4 @@ webrtcvad>=2.0.10
 librosa>=0.10.0
 soundfile>=0.12.1 
 pysrt
+SpeechRecognition>=3.10.0
