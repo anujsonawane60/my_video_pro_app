@@ -1,6 +1,6 @@
 # Video Processing App
 
-A full-stack application for processing videos with AI transcription, audio cleaning, and subtitle generation. 
+A full-stack application for processing videos with AI transcription, audio cleaning, voice changing, and subtitle generation.
 
 ## Architecture
 
@@ -13,8 +13,9 @@ This application consists of two main components:
 
 - Upload videos in various formats (MP4, AVI, MOV, MKV)
 - Extract audio from videos
-- Generate subtitles using AI (Whisper or AssemblyAI)
+- Generate subtitles using AI (Whisper)
 - Clean audio by removing filler words and noise
+- Voice changing capabilities with timing preservation
 - Interactive audio waveforms with visual comparison
 - Create final videos with embedded subtitles
 
@@ -89,11 +90,26 @@ The backend API provides the following endpoints:
 - `POST /extract-audio/{job_id}` - Extract audio from a video
 - `POST /generate-subtitles/{job_id}` - Generate subtitles for a video
 - `POST /clean-audio/{job_id}` - Clean the audio by removing noise and filler words
+- `POST /voice-change/{job_id}` - Change voice in audio while preserving timing
 - `POST /save-edited-subtitles/{job_id}` - Save edited subtitles
 - `POST /create-final-video/{job_id}` - Create a final video with clean audio and subtitles
 - `GET /job-status/{job_id}` - Get the status of a processing job
 - `GET /video-info/{job_id}` - Get information about a video
 - `GET /download/{job_id}/{file_type}` - Download a processed file
+
+## Project Structure
+
+### Backend
+- `main.py` - FastAPI application with endpoint definitions
+- `video_processor.py` - Core video processing functionality
+- `voice_changer.py` - Voice changing capabilities 
+- `uploads/` - Directory for uploaded video files
+- `outputs/` - Directory for processed files
+
+### Frontend
+- `src/components/` - React components
+- `src/pages/` - Page components
+- `src/services/` - API service layers
 
 ## License
 
@@ -103,7 +119,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [FFmpeg](https://ffmpeg.org/) for video processing
 - [OpenAI Whisper](https://github.com/openai/whisper) for transcription
-- [AssemblyAI](https://www.assemblyai.com/) for cloud-based transcription
+- [ElevenLabs](https://elevenlabs.io/) for voice changing capabilities
 - [WaveSurfer.js](https://wavesurfer-js.org/) for audio visualization
 - [React](https://reactjs.org/) for the frontend
 - [FastAPI](https://fastapi.tiangolo.com/) for the backend API 

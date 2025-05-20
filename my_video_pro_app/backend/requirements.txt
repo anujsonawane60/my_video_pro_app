@@ -1,18 +1,37 @@
+# Core API dependencies
 fastapi==0.95.1
 uvicorn==0.22.0
 python-multipart==0.0.6
 python-dotenv==1.0.0
-pydantic==2.11.4
+pydantic<2.0.0,>=1.6.2  # Compatible with FastAPI 0.95.1
 aiofiles==23.1.0
+
+# Data processing
 opencv-python==4.7.0.72
 numpy==1.24.3
 requests==2.30.0
+
+# Audio/Video processing
 ffmpeg-python==0.2.0
 whisper==1.1.10
 pydub==0.25.1
 webrtcvad==2.0.10
 noisereduce==2.0.1
 SpeechRecognition==3.10.0
+moviepy==1.0.3
+assemblyai==0.40.2
+librosa>=0.8.1
+soundfile>=0.10.3
+torch>=2.0.0  # Required for Whisper
+
+# Subtitle handling
 srt==3.5.2
-googletrans==4.0.0-rc1 
-pysrt
+pysrt==1.1.2
+
+# Translation
+googletrans==4.0.0-rc1
+
+# FFMPEG is required but installed separately
+# On Windows: Download from https://ffmpeg.org/download.html
+# On Linux: sudo apt-get install ffmpeg
+# On macOS: brew install ffmpeg

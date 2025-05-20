@@ -699,7 +699,9 @@ async def create_final_video(
     font_size: int = Form(24),
     subtitle_color: str = Form("white"),
     subtitle_bg_opacity: int = Form(80),
-    use_direct_ffmpeg: bool = Form(True)
+    use_direct_ffmpeg: bool = Form(True),
+    audio_id: str = Form("cleaned"),  # Default to cleaned audio
+    subtitle_id: str = Form(None)     # Added subtitle_id parameter
 ):
     """Create the final video with clean audio and subtitles"""
     if job_id not in processing_jobs:
@@ -710,17 +712,85 @@ async def create_final_video(
         video_path = job["video_path"]
         output_dir = job["output_dir"]
         
-        # Determine which subtitle file to use
+        # Determine which subtitle file to use based on subtitle_id or subtitle_path
         subtitle_file_to_use = None
-        if subtitle_path:
+        
+        print(f"Subtitle ID selected: {subtitle_id}")
+        print(f"Subtitle path provided: {subtitle_path}")
+        
+        if subtitle_id:
+            # Use subtitle based on ID
+            if subtitle_id == "original" and "steps" in job and "generate_subtitles" in job["steps"] and job["steps"]["generate_subtitles"]["status"] == "completed":
+                subtitle_file_to_use = job["steps"]["generate_subtitles"]["path"]
+                print(f"Using original subtitles based on ID: {subtitle_file_to_use}")
+            elif subtitle_id == "edited" and "edited_subtitle_path" in job:
+                subtitle_file_to_use = job["edited_subtitle_path"]
+                print(f"Using edited subtitles based on ID: {subtitle_file_to_use}")
+            elif subtitle_id == "marathi" and "translated_subtitle_path_mr" in job:
+                subtitle_file_to_use = job["translated_subtitle_path_mr"]
+                print(f"Using Marathi subtitles based on ID: {subtitle_file_to_use}")
+            elif subtitle_id == "hindi" and "translated_subtitle_path_hi" in job:
+                subtitle_file_to_use = job["translated_subtitle_path_hi"]
+                print(f"Using Hindi subtitles based on ID: {subtitle_file_to_use}")
+            else:
+                print(f"Could not find subtitles for ID: {subtitle_id}")
+        elif subtitle_path:
             # Use provided path (from frontend)
             subtitle_file_to_use = subtitle_path
+            print(f"Using provided subtitle path: {subtitle_file_to_use}")
         elif "edited_subtitle_path" in job and job["edited_subtitle_path"]:
             # Use edited subtitles
             subtitle_file_to_use = job["edited_subtitle_path"]
+            print(f"Using edited subtitle path: {subtitle_file_to_use}")
         elif job["steps"]["generate_subtitles"]["status"] == "completed":
             # Use original subtitles
             subtitle_file_to_use = job["steps"]["generate_subtitles"]["path"]
+            print(f"Using original subtitle path: {subtitle_file_to_use}")
+        else:
+            print("No suitable subtitle file found")
+        
+        # Verify that the selected subtitle file exists
+        if subtitle_file_to_use and not os.path.exists(subtitle_file_to_use):
+            print(f"Warning: Selected subtitle file does not exist: {subtitle_file_to_use}")
+            subtitle_file_to_use = None
+            
+        # Determine which audio file to use based on audio_id
+        custom_audio_path = None
+        
+        print(f"Audio ID selected: {audio_id}")
+        print(f"Available voice history: {len(job.get('voice_history', []))} items")
+        
+        if audio_id == "original" and "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
+            custom_audio_path = job["steps"]["extract_audio"]["path"]
+            print(f"Using original audio: {custom_audio_path}")
+        elif audio_id == "cleaned" and "steps" in job and "clean_audio" in job["steps"] and job["steps"]["clean_audio"]["status"] == "completed":
+            custom_audio_path = job["steps"]["clean_audio"]["path"]
+            print(f"Using cleaned audio: {custom_audio_path}")
+        elif audio_id and audio_id.startswith("voice_") and "voice_history" in job:
+            try:
+                voice_index = int(audio_id.split("_")[1])
+                if 0 <= voice_index < len(job["voice_history"]):
+                    custom_audio_path = job["voice_history"][voice_index]["path"]
+                    print(f"Using voice changed audio #{voice_index}: {custom_audio_path}")
+                else:
+                    print(f"Voice index {voice_index} out of range (0-{len(job['voice_history'])-1})")
+            except (ValueError, IndexError) as e:
+                print(f"Error parsing voice index from {audio_id}: {str(e)}")
+        else:
+            print(f"Could not match audio_id {audio_id} to any available audio")
+            # Fallback to using cleaned audio if available
+            if "steps" in job and "clean_audio" in job["steps"] and job["steps"]["clean_audio"]["status"] == "completed":
+                custom_audio_path = job["steps"]["clean_audio"]["path"]
+                print(f"Falling back to cleaned audio: {custom_audio_path}")
+            # Otherwise try original audio
+            elif "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
+                custom_audio_path = job["steps"]["extract_audio"]["path"]
+                print(f"Falling back to original audio: {custom_audio_path}")
+        
+        # Check if the selected audio file exists
+        if custom_audio_path and not os.path.exists(custom_audio_path):
+            custom_audio_path = None
+            print(f"Warning: Selected audio file does not exist: {custom_audio_path}")
         
         # Initialize VideoProcessor with appropriate settings
         processor = VideoProcessor(video_path, debug_mode=True)
@@ -731,8 +801,11 @@ async def create_final_video(
         processor.subtitle_bg_opacity = subtitle_bg_opacity
         processor.use_direct_ffmpeg = use_direct_ffmpeg
         
-        # Create final video
-        final_video_path = processor.create_final_video(subtitle_file_to_use)
+        # Create final video with custom audio if available
+        final_video_path = processor.create_final_video(
+            custom_subtitle_path=subtitle_file_to_use,
+            custom_audio_path=custom_audio_path
+        )
         
         # Copy the final video file to the job output directory
         output_filename = f"final_video_{job_id}.mp4"
@@ -743,6 +816,10 @@ async def create_final_video(
         job["steps"]["create_final_video"]["status"] = "completed"
         job["steps"]["create_final_video"]["path"] = output_path
         job["status"] = "completed"
+        
+        # Store the selected audio and subtitle choices in the job data
+        job["final_audio_id"] = audio_id
+        job["final_subtitle_id"] = subtitle_id
         
         return {
             "job_id": job_id, 
@@ -1011,6 +1088,149 @@ async def skip_voice_change(job_id: str, error_message: str = None):
         "voice_changed_audio_path": None,  # Include this field even if null
         "voice_history": job["voice_history"]
     }
+
+@app.get("/available-audio/{job_id}")
+async def get_available_audio(job_id: str):
+    """Get a list of all available audio files for a job"""
+    if job_id not in processing_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job = processing_jobs[job_id]
+    available_audio = []
+    
+    print(f"Gathering available audio for job {job_id}")
+    
+    # Add original audio if available
+    if "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
+        original_audio_path = job["steps"]["extract_audio"]["path"]
+        if os.path.exists(original_audio_path):
+            print(f"Found original audio: {original_audio_path}")
+            available_audio.append({
+                "id": "original",
+                "name": "Original Audio",
+                "path": original_audio_path,
+                "url_path": f"/outputs/{job_id}/audio_{job_id}.wav",
+                "type": "original"
+            })
+    
+    # Add cleaned audio if available
+    if "steps" in job and "clean_audio" in job["steps"] and job["steps"]["clean_audio"]["status"] == "completed":
+        cleaned_audio_path = job["steps"]["clean_audio"]["path"]
+        if os.path.exists(cleaned_audio_path):
+            print(f"Found cleaned audio: {cleaned_audio_path}")
+            available_audio.append({
+                "id": "cleaned",
+                "name": "Cleaned Audio",
+                "path": cleaned_audio_path,
+                "url_path": f"/outputs/{job_id}/cleaned_audio_{job_id}.wav",
+                "type": "cleaned"
+            })
+    
+    # Add voice changed audio files if available
+    if "voice_history" in job and job["voice_history"]:
+        print(f"Found {len(job['voice_history'])} voice history entries")
+        for i, voice in enumerate(job["voice_history"]):
+            if "path" in voice and os.path.exists(voice["path"]):
+                print(f"Found voice {i}: {voice.get('voice_name', f'Voice {i+1}')} at {voice['path']}")
+                available_audio.append({
+                    "id": f"voice_{i}",
+                    "name": f"{voice.get('voice_name', f'Voice {i+1}')}",
+                    "path": voice["path"],
+                    "url_path": voice["url_path"],
+                    "type": "voice_changed",
+                    "voice_id": voice.get("voice_id", ""),
+                    "language": voice.get("language", "en")
+                })
+            else:
+                print(f"Voice {i} has no path or file doesn't exist: {voice.get('path', 'No path')}")
+    
+    # Force at least one audio option if list is empty
+    if not available_audio and "steps" in job and "extract_audio" in job["steps"]:
+        # Try to create a minimal entry based on job data
+        extract_step = job["steps"]["extract_audio"]
+        if "path" in extract_step:
+            audio_path = extract_step["path"]
+            print(f"No audio files found, using fallback: {audio_path}")
+            available_audio.append({
+                "id": "original",
+                "name": "Original Audio (Fallback)",
+                "path": audio_path,
+                "url_path": f"/outputs/{job_id}/audio_{job_id}.wav",
+                "type": "original"
+            })
+    
+    print(f"Returning {len(available_audio)} audio files")
+    return {"available_audio": available_audio}
+
+@app.get("/available-subtitles/{job_id}")
+async def get_available_subtitles(job_id: str):
+    """Get a list of all available subtitle files for a job"""
+    if job_id not in processing_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job = processing_jobs[job_id]
+    available_subtitles = []
+    
+    print(f"Gathering available subtitles for job {job_id}")
+    
+    # Add original subtitles if available
+    if "steps" in job and "generate_subtitles" in job["steps"] and job["steps"]["generate_subtitles"]["status"] == "completed":
+        subtitle_path = job["steps"]["generate_subtitles"]["path"]
+        if os.path.exists(subtitle_path):
+            print(f"Found original subtitles: {subtitle_path}")
+            available_subtitles.append({
+                "id": "original",
+                "name": "Original Subtitles",
+                "path": subtitle_path,
+                "url_path": f"/outputs/{job_id}/subtitles_{job_id}.srt",
+                "type": "original",
+                "language": job.get("language", "en")
+            })
+    
+    # Add edited subtitles if available
+    if "edited_subtitle_path" in job and job["edited_subtitle_path"]:
+        edited_subtitle_path = job["edited_subtitle_path"]
+        if os.path.exists(edited_subtitle_path):
+            print(f"Found edited subtitles: {edited_subtitle_path}")
+            available_subtitles.append({
+                "id": "edited",
+                "name": "Edited Subtitles",
+                "path": edited_subtitle_path,
+                "url_path": edited_subtitle_path.replace(str(OUTPUT_DIR), "/outputs"),
+                "type": "edited",
+                "language": job.get("language", "en")
+            })
+    
+    # Add translated Marathi subtitles if available
+    if "translated_subtitle_path_mr" in job and job["translated_subtitle_path_mr"]:
+        mr_subtitle_path = job["translated_subtitle_path_mr"]
+        if os.path.exists(mr_subtitle_path):
+            print(f"Found Marathi subtitles: {mr_subtitle_path}")
+            available_subtitles.append({
+                "id": "marathi",
+                "name": "Marathi Subtitles",
+                "path": mr_subtitle_path,
+                "url_path": mr_subtitle_path.replace(str(OUTPUT_DIR), "/outputs"),
+                "type": "translated",
+                "language": "mr"
+            })
+    
+    # Add translated Hindi subtitles if available
+    if "translated_subtitle_path_hi" in job and job["translated_subtitle_path_hi"]:
+        hi_subtitle_path = job["translated_subtitle_path_hi"]
+        if os.path.exists(hi_subtitle_path):
+            print(f"Found Hindi subtitles: {hi_subtitle_path}")
+            available_subtitles.append({
+                "id": "hindi",
+                "name": "Hindi Subtitles",
+                "path": hi_subtitle_path,
+                "url_path": hi_subtitle_path.replace(str(OUTPUT_DIR), "/outputs"),
+                "type": "translated",
+                "language": "hi"
+            })
+    
+    print(f"Returning {len(available_subtitles)} subtitle files")
+    return {"available_subtitles": available_subtitles}
 
 # Run the server if executed directly
 if __name__ == "__main__":

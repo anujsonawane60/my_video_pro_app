@@ -4,7 +4,7 @@ import subprocess
 import re
 import shutil
 import traceback
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import whisper
@@ -1120,12 +1120,13 @@ class VideoProcessor:
         """
         return time_obj.hours * 3600 + time_obj.minutes * 60 + time_obj.seconds + time_obj.milliseconds / 1000
 
-    def create_final_video(self, custom_subtitle_path=None) -> str:
+    def create_final_video(self, custom_subtitle_path=None, custom_audio_path=None) -> str:
         """
-        Create a final video with clean audio and subtitles.
+        Create a final video with selected audio and subtitles.
         
         Args:
             custom_subtitle_path: Optional path to custom subtitle file. If provided, uses this instead of the default.
+            custom_audio_path: Optional path to custom audio file. If provided, uses this instead of the default.
             
         Returns:
             Path to the final video file
@@ -1136,6 +1137,12 @@ class VideoProcessor:
         
         # Debug logging for file paths
         print(f"DEBUG - Looking for audio files:")
+        print(f"DEBUG - Custom audio path provided: {custom_audio_path}")
+        if custom_audio_path:
+            print(f"DEBUG - Custom audio exists: {os.path.exists(custom_audio_path)}")
+            if os.path.exists(custom_audio_path):
+                print(f"DEBUG - Custom audio size: {os.path.getsize(custom_audio_path)} bytes")
+        
         print(f"DEBUG - Cleaned audio path: {self.cleaned_audio_path}, exists: {os.path.exists(self.cleaned_audio_path)}")
         print(f"DEBUG - Original audio path: {self.audio_path}, exists: {os.path.exists(self.audio_path)}")
         print(f"DEBUG - Video path: {self.video_path}, exists: {os.path.exists(self.video_path)}")
@@ -1143,8 +1150,12 @@ class VideoProcessor:
         # Try to find any available audio file
         available_audio = None
         
-        # First check the cleaned audio path
-        if os.path.exists(self.cleaned_audio_path) and os.path.getsize(self.cleaned_audio_path) > 0:
+        # First check if custom audio path was provided
+        if custom_audio_path and os.path.exists(custom_audio_path) and os.path.getsize(custom_audio_path) > 0:
+            available_audio = custom_audio_path
+            print(f"DEBUG - Using custom audio: {available_audio}")
+        # Then check the cleaned audio path
+        elif os.path.exists(self.cleaned_audio_path) and os.path.getsize(self.cleaned_audio_path) > 0:
             available_audio = self.cleaned_audio_path
             print(f"DEBUG - Using cleaned audio: {available_audio}")
         # Then check the original extracted audio
@@ -1174,11 +1185,91 @@ class VideoProcessor:
             print(f"Warning: Subtitle file not found at {subtitle_path_to_use}. Video will not have subtitles.")
         else:
             print(f"Using subtitle file: {subtitle_path_to_use}")
+            # Debug: Read first few lines of subtitle file to verify content
+            try:
+                with open(subtitle_path_to_use, 'r', encoding='utf-8') as f:
+                    content = f.read(500)  # Read first 500 chars
+                    print(f"Subtitle file content preview: {content[:200]}...")
+                    print(f"Subtitle file size: {os.path.getsize(subtitle_path_to_use)} bytes")
+            except Exception as e:
+                print(f"Error reading subtitle file: {e}")
         
         try:
-            print(f"Creating final video with audio from {available_audio}")
+            # Try using direct FFmpeg approach first - more reliable for subtitle integration
+            if self.use_direct_ffmpeg and os.path.exists(subtitle_path_to_use):
+                print("Using direct FFmpeg approach for better subtitle integration")
+                try:
+                    output_path = os.path.join(self.output_dir, "ffmpeg_final_video.mp4")
+                    
+                    # Ensure subtitle file path is properly formatted for ffmpeg
+                    subtitle_path_norm = os.path.normpath(subtitle_path_to_use)
+                    subtitle_path_ffmpeg = subtitle_path_norm.replace('\\', '/')  # FFmpeg prefers forward slashes
+                    print(f"Formatted subtitle path for FFmpeg: {subtitle_path_ffmpeg}")
+                    
+                    # Prepare FFmpeg command for subtitle burning
+                    command = [
+                        "ffmpeg", "-y",
+                        "-i", self.video_path,     # Input video
+                        "-i", available_audio,     # Input audio
+                        "-map", "0:v",             # Use video from first input
+                        "-map", "1:a",             # Use audio from second input
+                        "-c:v", "libx264",         # Use H.264 codec for video
+                        "-crf", "23",              # Quality setting
+                        "-c:a", "aac",             # Convert audio to AAC
+                        "-b:a", "192k",            # Audio bitrate
+                        "-vf", f"subtitles={subtitle_path_ffmpeg}",  # Use prepared path
+                        "-shortest"                # Use shortest input length
+                    ]
+                    
+                    # Add output file
+                    command.append(output_path)
+                    
+                    # Join command for display (but don't run the joined version)
+                    print(f"Running FFmpeg command: {' '.join(command)}")
+                    
+                    # Run the command with proper argument list
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False  # Don't raise exception, we'll check manually
+                    )
+                    
+                    # Check if command succeeded
+                    if result.returncode == 0:
+                        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                            print(f"FFmpeg successfully created video with subtitles at {output_path}")
+                            # Copy to final path
+                            shutil.copy2(output_path, self.final_video_path)
+                        print(f"Copied FFmpeg output to final path: {self.final_video_path}")
+                        
+                        # Close video resources to avoid memory leaks
+                        try:
+                            if 'original_video' in locals():
+                                original_video.close()
+                            if 'audio_clip' in locals():
+                                audio_clip.close()
+                        except Exception as close_error:
+                            print(f"Warning: Could not close video resources: {close_error}")
+                            
+                        return self.final_video_path
+                    else:
+                        print(f"FFmpeg command failed with return code {result.returncode}")
+                        if result.returncode != 0:
+                            print(f"Error output: {result.stderr}")
+                        elif not os.path.exists(output_path):
+                            print(f"Error: Output file not created: {output_path}")
+                        elif os.path.getsize(output_path) < 1000000:
+                            print(f"Warning: Output file size too small: {os.path.getsize(output_path)} bytes")
+                        # Continue to MoviePy approach
+                except Exception as e:
+                    print(f"Error during FFmpeg processing: {e}")
+                    # Continue to MoviePy approach
             
-            # Always use MoviePy approach for better subtitle control
+            print(f"Creating final video with audio from {available_audio} using MoviePy")
+            
+            # Load original video
             original_video = VideoFileClip(self.video_path)
             print(f"Loaded original video: {self.video_path}, duration: {original_video.duration}s")
             
@@ -1187,6 +1278,7 @@ class VideoProcessor:
             print(f"Loaded audio: {available_audio}, duration: {audio_clip.duration}s")
             
             # Create video with clean audio - force replacement
+            # Important: We must set_audio with copy=False to ensure audio is actually replaced
             video_with_clean_audio = original_video.set_audio(audio_clip)
             print("Set clean audio to video")
             
@@ -1195,49 +1287,72 @@ class VideoProcessor:
             if os.path.exists(subtitle_path_to_use):
                 print(f"Processing subtitles from {subtitle_path_to_use}")
                 try:
-                    # Create a simplified approach for subtitles to ensure they work
-                    from moviepy.editor import CompositeVideoClip, TextClip
-                    
                     # Parse the SRT file for subtitles
                     subtitles = []
                     try:
                         # Try with pysrt first
-                        import pysrt
-                        subs = pysrt.open(subtitle_path_to_use, encoding='utf-8')
-                        print(f"Loaded {len(subs)} subtitles with pysrt")
-                        
-                        for sub in subs:
-                            start_time = self._time_to_seconds(sub.start)
-                            end_time = self._time_to_seconds(sub.end)
-                            text = sub.text.replace('\\N', '\n')
-                            subtitles.append((start_time, end_time, text))
-                    except Exception as e:
-                        print(f"pysrt failed: {e}, using manual parsing")
-                        # Manual parsing as fallback
-                        with open(subtitle_path_to_use, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        
-                        blocks = content.split('\n\n')
-                        for block in blocks:
-                            if block.strip():
-                                lines = block.strip().split('\n')
-                                if len(lines) >= 3:
-                                    try:
-                                        # Extract times
-                                        times = lines[1].split(' --> ')
-                                        start_str = times[0].strip()
-                                        end_str = times[1].strip()
-                                        
-                                        # Parse times
-                                        start_time = self._srt_timestamp_to_seconds(start_str)
-                                        end_time = self._srt_timestamp_to_seconds(end_str)
-                                        
-                                        # Get text (join all remaining lines)
-                                        text = ' '.join(lines[2:])
-                                        
+                        print(f"Attempting to load subtitles with pysrt from {subtitle_path_to_use}")
+                        # Try with different encodings
+                        for encoding in ['utf-8', 'utf-8-sig', 'cp1252', 'latin-1']:
+                            try:
+                                print(f"Trying encoding: {encoding}")
+                                subs = pysrt.open(subtitle_path_to_use, encoding=encoding)
+                                if len(subs) > 0:
+                                    print(f"Successfully loaded {len(subs)} subtitles with pysrt using {encoding} encoding")
+                                    for sub in subs:
+                                        start_time = self._time_to_seconds(sub.start)
+                                        end_time = self._time_to_seconds(sub.end)
+                                        text = sub.text.replace('\\N', '\n')
                                         subtitles.append((start_time, end_time, text))
-                                    except Exception as e:
-                                        print(f"Error parsing subtitle block: {e}")
+                                    break
+                            except Exception as e:
+                                print(f"pysrt failed with {encoding}: {e}")
+                        
+                        # If pysrt didn't work, fall back to manual parsing
+                        if not subtitles:
+                            print("pysrt failed, using manual parsing")
+                            # Try manual parsing with different encodings
+                            for encoding in ['utf-8', 'utf-8-sig', 'cp1252', 'latin-1']:
+                                try:
+                                    print(f"Manual parsing with encoding: {encoding}")
+                                    with open(subtitle_path_to_use, 'r', encoding=encoding) as f:
+                                        content = f.read()
+                                    
+                                    # Debugging: Show the content
+                                    print(f"Content preview: {content[:200]}")
+                                    
+                                    # Parse SRT format
+                                    blocks = content.split('\n\n')
+                                    for block in blocks:
+                                        if block.strip():
+                                            lines = block.strip().split('\n')
+                                            if len(lines) >= 3:
+                                                try:
+                                                    # Extract times
+                                                    times = lines[1].split(' --> ')
+                                                    start_str = times[0].strip()
+                                                    end_str = times[1].strip()
+                                                    
+                                                    # Parse times
+                                                    start_time = self._srt_timestamp_to_seconds(start_str)
+                                                    end_time = self._srt_timestamp_to_seconds(end_str)
+                                                    
+                                                    # Get text (join all remaining lines)
+                                                    text = '\n'.join(lines[2:])
+                                                    
+                                                    subtitles.append((start_time, end_time, text))
+                                                    print(f"Parsed subtitle: {start_time}-{end_time}: {text[:30]}...")
+                                                except Exception as e:
+                                                    print(f"Error parsing subtitle block: {e}")
+                                    
+                                    if subtitles:
+                                        print(f"Successfully parsed {len(subtitles)} subtitles manually")
+                                        break
+                                except Exception as e:
+                                    print(f"Manual parsing failed with {encoding}: {e}")
+                    except Exception as e:
+                        print(f"Error loading subtitles: {e}")
+                        traceback.print_exc()
                     
                     print(f"Parsed {len(subtitles)} subtitle entries")
                     
@@ -1249,21 +1364,48 @@ class VideoProcessor:
                         
                         for start_time, end_time, text in subtitles:
                             # Create subtitle with better visibility settings
-                            txt_clip = TextClip(
-                                text, 
-                                fontsize=self.subtitle_font_size, 
-                                color='white',  # Always use white for better visibility
-                                bg_color='black',
-                                font='Arial-Bold',  # Use bold font
-                                size=(video_width * 0.8, None),  # Use 80% of video width
-                                method='caption',
-                                align='center',
-                                stroke_color='black',  # Add stroke for better visibility
-                                stroke_width=2
-                            )
+                            try:
+                                # Create a text clip with contrasting colors and outline for better visibility
+                                txt_clip = TextClip(
+                                    text, 
+                                    fontsize=self.subtitle_font_size, 
+                                    color='white',
+                                    bg_color='black',
+                                    # Try multiple common fonts that might be available
+                                    font='Arial',
+                                    size=(video_width * 0.9, None),  # Use 90% of video width
+                                    method='caption',
+                                    align='center',
+                                    stroke_color='black',
+                                    stroke_width=1
+                                )
+                            except Exception as clip_error:
+                                print(f"Error creating TextClip with specified settings: {clip_error}")
+                                try:
+                                    # First fallback with minimal font specification
+                                    print("Trying fallback font rendering...")
+                                    txt_clip = TextClip(
+                                        text, 
+                                        fontsize=self.subtitle_font_size, 
+                                        color='white',
+                                        bg_color='black',
+                                        size=(video_width * 0.9, None),
+                                        method='caption',
+                                        align='center'
+                                    )
+                                except Exception as fallback_error:
+                                    print(f"Fallback font rendering failed: {fallback_error}")
+                                    # Ultimate fallback with minimum settings
+                                    print("Using ultimate fallback font rendering")
+                                    txt_clip = TextClip(
+                                        text, 
+                                        fontsize=self.subtitle_font_size, 
+                                        color='white',
+                                        size=(video_width * 0.9, None)
+                                    )
                             
-                            # Position at bottom 1/8 of the video height
-                            subtitle_y_position = video_height * 7/8
+                            # Position at bottom of the screen with a bit of margin
+                            subtitle_y_position = video_height * 0.85
                             text_position = ('center', subtitle_y_position)
                             
                             # Set timing and position
@@ -1276,13 +1418,11 @@ class VideoProcessor:
                         
                         # Create composite with subtitles
                         print(f"Creating composite with {len(subtitle_clips)} subtitle clips")
+                        # IMPORTANT: Make sure to use the video with clean audio as the base
                         final_video = CompositeVideoClip([video_with_clean_audio] + subtitle_clips)
-                        
-                        # Debug output
-                        print(f"Final video size: {final_video.size}")
-                        print(f"Number of clips in composite: {len(final_video.clips)}")
+                        print(f"Final video created with subtitles")
                     else:
-                        print("No valid subtitles found, skipping subtitles")
+                        print("No valid subtitles found, using video with clean audio only")
                         final_video = video_with_clean_audio
                 
                 except Exception as e:
@@ -1304,7 +1444,8 @@ class VideoProcessor:
                 temp_audiofile=os.path.join(self.output_dir, "temp_audio.m4a"),
                 remove_temp=True,
                 fps=original_video.fps,  # Use original FPS
-                threads=2  # Use fewer threads for better stability
+                threads=2,               # Use fewer threads for better stability
+                ffmpeg_params=["-crf", "23", "-b:a", "192k"]  # Set quality parameters
             )
             
             # Close to free resources
@@ -1327,31 +1468,35 @@ class VideoProcessor:
             
             # If that didn't work, try a very simple approach with FFmpeg directly
             try:
-                print("Attempting direct FFmpeg approach")
-                output_path = os.path.join(self.output_dir, "ffmpeg_output.mp4")
+                print("Attempting direct FFmpeg approach as fallback")
+                output_path = os.path.join(self.output_dir, "ffmpeg_fallback_output.mp4")
                 
                 # Use FFmpeg to combine video with audio
                 command = [
                     "ffmpeg", "-y",
                     "-i", self.video_path,  # Input video
                     "-i", available_audio,  # Input audio
-                    "-map", "0:v",  # Use video from first input
-                    "-map", "1:a",  # Use audio from second input
-                    "-c:v", "libx264",  # Use H.264 codec
-                    "-c:a", "aac",  # Convert audio to AAC
-                    "-shortest"  # Use shortest input length
+                    "-map", "0:v",          # Use video from first input
+                    "-map", "1:a",          # Use audio from second input
+                    "-c:v", "copy",         # Copy video stream without re-encoding
+                    "-c:a", "aac",          # Convert audio to AAC
+                    "-shortest"             # Use shortest input length
                 ]
                 
                 # Add subtitles in fallback method too if available
                 if os.path.exists(subtitle_path_to_use):
                     print(f"Adding subtitles in fallback method: {subtitle_path_to_use}")
-                    subtitle_path_escaped = subtitle_path_to_use.replace("\\", "\\\\").replace("'", "\\'")
-                    command[6:6] = ["-vf", f"subtitles={subtitle_path_escaped}"]
+                    subtitle_path_norm = os.path.normpath(subtitle_path_to_use)
+                    subtitle_path_ffmpeg = subtitle_path_norm.replace('\\', '/')  # FFmpeg prefers forward slashes
+                    print(f"Formatted subtitle path for FFmpeg fallback: {subtitle_path_ffmpeg}")
+                    command.extend(["-vf", f"subtitles={subtitle_path_ffmpeg}"])
+                    # If we're adding subtitles, we can't copy the video stream
+                    command[8] = "libx264"  # Replace "copy" with "libx264"
                 
                 # Add output file
                 command.append(output_path)
                 
-                print(f"Running command: {' '.join(command)}")
+                print(f"Running fallback command: {' '.join(command)}")
                 subprocess.run(command, check=True, capture_output=True)
                 
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 1000000:
@@ -1359,10 +1504,10 @@ class VideoProcessor:
                     shutil.copy2(output_path, self.final_video_path)
                     return self.final_video_path
                 else:
-                    print("FFmpeg approach failed")
+                    print("FFmpeg fallback approach failed")
                 
             except Exception as e2:
-                print(f"Error in FFmpeg approach: {e2}")
+                print(f"Error in FFmpeg fallback approach: {e2}")
                 traceback.print_exc()
             
             # If all else fails, just copy the original video
@@ -1866,4 +2011,115 @@ class VideoProcessor:
             
         except Exception as e:
             print(f"Command line Marathi transcription failed: {e}")
-            return False 
+            return False
+    
+    def get_available_files(self) -> Dict[str, List[Dict[str, str]]]:
+        """
+        Get a list of available audio and subtitle files for selection.
+        
+        Returns:
+            Dictionary containing lists of audio and subtitle files with their metadata
+        """
+        audio_files = []
+        subtitle_files = []
+        
+        # Add original audio if it exists
+        if os.path.exists(self.audio_path):
+            audio_files.append({
+                "path": self.audio_path,
+                "name": "Original Extracted Audio",
+                "size": os.path.getsize(self.audio_path),
+                "type": "original"
+            })
+        
+        # Add cleaned audio if it exists
+        if os.path.exists(self.cleaned_audio_path):
+            audio_files.append({
+                "path": self.cleaned_audio_path,
+                "name": "Cleaned Audio",
+                "size": os.path.getsize(self.cleaned_audio_path),
+                "type": "cleaned"
+            })
+        
+        # Add noise reduced audio if it exists
+        if os.path.exists(self.noise_reduced_audio_path):
+            audio_files.append({
+                "path": self.noise_reduced_audio_path,
+                "name": "Noise Reduced Audio",
+                "size": os.path.getsize(self.noise_reduced_audio_path),
+                "type": "noise_reduced"
+            })
+        
+        # Add VAD cleaned audio if it exists
+        if os.path.exists(self.vad_cleaned_audio_path):
+            audio_files.append({
+                "path": self.vad_cleaned_audio_path,
+                "name": "Voice Activity Detected Audio",
+                "size": os.path.getsize(self.vad_cleaned_audio_path),
+                "type": "vad_cleaned"
+            })
+        
+        # Add original subtitle file if it exists
+        if os.path.exists(self.subtitles_path):
+            subtitle_files.append({
+                "path": self.subtitles_path,
+                "name": "Generated Subtitles",
+                "size": os.path.getsize(self.subtitles_path),
+                "type": "generated"
+            })
+        
+        # Find any additional subtitle files in the output directory
+        for file in os.listdir(self.output_dir):
+            if file.endswith('.srt') and os.path.join(self.output_dir, file) != self.subtitles_path:
+                subtitle_path = os.path.join(self.output_dir, file)
+                subtitle_files.append({
+                    "path": subtitle_path,
+                    "name": f"Subtitle: {file}",
+                    "size": os.path.getsize(subtitle_path),
+                    "type": "additional"
+                })
+        
+        return {
+            "audio_files": audio_files,
+            "subtitle_files": subtitle_files
+        }
+    
+    def save_uploaded_file(self, file, file_type: str) -> Optional[str]:
+        """
+        Save an uploaded file (audio or subtitle) to the output directory.
+        
+        Args:
+            file: The uploaded file object
+            file_type: Type of file ('audio' or 'subtitle')
+            
+        Returns:
+            Path to the saved file or None if failed
+        """
+        try:
+            # Create filename based on type
+            if file_type == 'audio':
+                extension = os.path.splitext(file.filename)[1].lower()
+                if extension not in ['.wav', '.mp3', '.m4a', '.aac']:
+                    print(f"Unsupported audio format: {extension}")
+                    return None
+                output_path = os.path.join(self.output_dir, f"uploaded_audio{extension}")
+            elif file_type == 'subtitle':
+                extension = os.path.splitext(file.filename)[1].lower()
+                if extension != '.srt':
+                    print(f"Unsupported subtitle format: {extension}")
+                    return None
+                output_path = os.path.join(self.output_dir, f"uploaded_subtitle{extension}")
+            else:
+                print(f"Unsupported file type: {file_type}")
+                return None
+            
+            # Save the file
+            with open(output_path, 'wb') as f:
+                f.write(file.read())
+            
+            print(f"Saved uploaded {file_type} to {output_path}")
+            return output_path
+            
+        except Exception as e:
+            print(f"Error saving uploaded file: {e}")
+            return None 

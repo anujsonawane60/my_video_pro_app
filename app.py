@@ -25,6 +25,51 @@ st.markdown("""
     .stButton button { min-width: 120px; }
     .success-box { padding: 1rem; background-color: #e6f7e6; border-radius: 5px; }
     .video-box { padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+    .info-card { 
+        background-color: #f9f9f9;
+        border-radius: 5px;
+        padding: 10px;
+        margin-bottom: 15px;
+        border: 1px solid #eee;
+    }
+    .stAudio {
+        width: 100% !important;
+    }
+    .stPlotlyChart, .stImage {
+        width: 100% !important;
+        margin-bottom: 15px;
+    }
+    /* Make audio waveform container responsive */
+    [data-testid="stImage"] img {
+        max-width: 100%;
+        height: auto !important;
+    }
+    /* Make debug logs container take full width */
+    .stTextArea textarea {
+        width: 100% !important;
+    }
+    /* Audio comparison styling */
+    .comparison-container {
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        padding: 10px;
+        background-color: #f9f9f9;
+    }
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #f0f0f0;
+        border-radius: 4px 4px 0 0;
+        padding: 5px 15px;
+        border: 1px solid #ddd;
+        border-bottom: none;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: white;
+        border-bottom: 1px solid white;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,18 +129,110 @@ def safe_copy_file(source_path, file_type):
         add_log(f"Error copying file: {e}")
     return None
 
-# Function to display audio waveform
-def display_waveform(audio_path):
+# Function to display audio waveform with interactive playback
+def display_interactive_waveform(audio_path, color='#1f77b4'):
     try:
+        # Load audio file
         y, sr = librosa.load(audio_path)
-        fig, ax = plt.subplots()
-        librosa.display.waveshow(y, sr=sr, ax=ax)
-        ax.set(title='Audio Waveform')
-        ax.label_outer()
-        st.pyplot(fig)
+        duration = librosa.get_duration(y=y, sr=sr)
+        
+        # Create time array for x-axis
+        time = np.linspace(0, duration, len(y))
+        
+        # Create figure with subplots
+        fig = plt.figure(figsize=(10, 3))
+        ax = fig.add_subplot(111)
+        
+        # Plot waveform
+        ax.plot(time, y, color=color, alpha=0.7)
+        
+        # Add vertical line for playback position
+        line = ax.axvline(x=0, color='r', alpha=0.7)
+        
+        # Set up plot
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Amplitude')
+        ax.set_title('Interactive Audio Waveform (Click to Jump)')
+        plt.tight_layout()
+        
+        # Create interactive chart with Streamlit
+        st_chart = st.pyplot(fig)
+        
+        # Add a separate playback control with current position display
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            position = st.slider("Position", 0.0, float(duration), 0.0, step=0.1, key=f"pos_{audio_path}")
+        with col2:
+            st.write(f"Time: {position:.1f}s")
+            
+        # Update line position based on slider
+        line.set_xdata(position)
+        st_chart.pyplot(fig)
+        
+        return True
     except Exception as e:
-        st.error(f"Error displaying waveform: {e}")
-        add_log(f"Error displaying waveform: {e}")
+        st.error(f"Error displaying interactive waveform: {str(e)}")
+        add_log(f"Error displaying interactive waveform: {str(e)}")
+        return False
+
+# Function to display original and cleaned audio waveforms for comparison
+def display_waveform_comparison(original_audio_path, cleaned_audio_path):
+    try:
+        # Load both audio files
+        y_orig, sr_orig = librosa.load(original_audio_path)
+        y_clean, sr_clean = librosa.load(cleaned_audio_path)
+        
+        # Get max duration to align properly
+        duration_orig = librosa.get_duration(y=y_orig, sr=sr_orig)
+        duration_clean = librosa.get_duration(y=y_clean, sr=sr_clean)
+        max_duration = max(duration_orig, duration_clean)
+        
+        # Create time arrays
+        time_orig = np.linspace(0, duration_orig, len(y_orig))
+        time_clean = np.linspace(0, duration_clean, len(y_clean))
+        
+        # Create figure with two subplots for comparison
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        
+        # Plot original waveform
+        ax1.plot(time_orig, y_orig, color='#ff7f0e', alpha=0.7)
+        ax1.set_title('Original Audio')
+        ax1.set_ylabel('Amplitude')
+        
+        # Plot cleaned waveform
+        ax2.plot(time_clean, y_clean, color='#2ca02c', alpha=0.7)
+        ax2.set_title('Cleaned Audio')
+        ax2.set_ylabel('Amplitude')
+        ax2.set_xlabel('Time (s)')
+        
+        # Add vertical line for playback position (shared between plots)
+        line1 = ax1.axvline(x=0, color='r', alpha=0.7)
+        line2 = ax2.axvline(x=0, color='r', alpha=0.7)
+        
+        # Set x-axis to show full duration
+        ax2.set_xlim(0, max_duration)
+        
+        plt.tight_layout()
+        
+        # Display the plot
+        st_chart = st.pyplot(fig)
+        
+        # Add a shared playback control
+        position = st.slider("Compare Position", 0.0, float(max_duration), 0.0, step=0.1, key="compare_pos")
+        
+        # Update both lines based on slider
+        line1.set_xdata(position)
+        line2.set_xdata(position)
+        st_chart.pyplot(fig)
+        
+        # Display time information
+        st.write(f"Comparison Time: {position:.1f}s / {max_duration:.1f}s")
+        
+        return True
+    except Exception as e:
+        st.error(f"Error displaying waveform comparison: {str(e)}")
+        add_log(f"Error displaying waveform comparison: {str(e)}")
+        return False
 
 # Main title
 st.title("🎬 Video Processing App")
@@ -195,7 +332,7 @@ with st.sidebar:
         )
 
 # Main content area
-main_col1, main_col2 = st.columns([2, 1])
+main_col1, main_col2 = st.columns([3, 1])
 
 with main_col1:
     # Video upload section
@@ -267,9 +404,10 @@ with main_col1:
         st.subheader("Processing Steps")
 
         # Step 1: Extract Audio
+        st.subheader("1. Extract Audio")
         step1_col1, step1_col2 = st.columns([1, 2])
         with step1_col1:
-            if st.button("1. Extract Audio"):
+            if st.button("Extract Audio"):
                 with st.spinner("Extracting audio..."):
                     try:
                         add_log("Starting audio extraction")
@@ -290,9 +428,17 @@ with main_col1:
         with step1_col2:
             if st.session_state.current_step >= 1 and st.session_state.saved_audio_path:
                 try:
-                    # Use saved audio path instead of temporary one
-                    st.audio(st.session_state.saved_audio_path)
-                    display_waveform(st.session_state.saved_audio_path)
+                    # Wrap in a container to make it more consistent
+                    with st.container():
+                        # Add a header to better organize the content
+                        st.subheader("Extracted Audio")
+                        # Use saved audio path instead of temporary one
+                        st.audio(st.session_state.saved_audio_path)
+                        # Add a small space between the audio player and waveform
+                        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                        # Display interactive waveform
+                        st.info("Use the slider below to navigate through the audio and find noisy sections")
+                        display_interactive_waveform(st.session_state.saved_audio_path, color='#ff7f0e')
                 except Exception as e:
                     st.error(f"Error playing audio: {str(e)}")
                     add_log(f"Error playing audio: {str(e)}")
@@ -363,6 +509,7 @@ with main_col1:
 
         # Step 3: Clean Audio
         if st.session_state.current_step >= 2:
+            st.subheader("3. Clean Audio")
             step3_col1, step3_col2 = st.columns([1, 2])
             with step3_col1:
                 if st.button("3. Clean Audio"):
@@ -386,12 +533,68 @@ with main_col1:
             with step3_col2:
                 if st.session_state.current_step >= 3 and st.session_state.saved_cleaned_audio_path:
                     try:
-                        # Use saved clean audio path
-                        st.audio(st.session_state.saved_cleaned_audio_path)
-                        display_waveform(st.session_state.saved_cleaned_audio_path)
+                        # Wrap in a container to make it more consistent
+                        with st.container():
+                            # Add a header to better organize the content
+                            st.subheader("Cleaned Audio")
+                            # Use saved clean audio path
+                            st.audio(st.session_state.saved_cleaned_audio_path)
+                            # Add a small space between the audio player and waveform
+                            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+                            # Display interactive waveform
+                            display_interactive_waveform(st.session_state.saved_cleaned_audio_path, color='#2ca02c')
                     except Exception as e:
                         st.error(f"Error playing cleaned audio: {str(e)}")
                         add_log(f"Error playing cleaned audio: {str(e)}")
+            
+            # Add audio comparison section if both original and cleaned audio are available
+            if st.session_state.current_step >= 3 and st.session_state.saved_audio_path and st.session_state.saved_cleaned_audio_path:
+                st.markdown('<div class="comparison-container">', unsafe_allow_html=True)
+                st.subheader("Audio Comparison Analysis")
+                st.info("Compare the original and cleaned audio to see the noise reduction and improvements. Use the timeline slider to navigate through both audio samples simultaneously.")
+                
+                # Create tabs for different ways to compare
+                compare_tab1, compare_tab2 = st.tabs(["Side-by-Side Players", "Waveform Comparison"])
+                
+                with compare_tab1:
+                    # Display the audio players side by side
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("<h4 style='text-align: center; color: #ff7f0e;'>Original Audio</h4>", unsafe_allow_html=True)
+                        st.audio(st.session_state.saved_audio_path)
+                        st.markdown("""
+                        <div style='background-color: #fff9e6; padding: 8px; border-radius: 4px; font-size: 0.9em;'>
+                        This is the extracted raw audio from your video that may contain background noise, filler words, and other audio issues.
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with col2:
+                        st.markdown("<h4 style='text-align: center; color: #2ca02c;'>Cleaned Audio</h4>", unsafe_allow_html=True)
+                        st.audio(st.session_state.saved_cleaned_audio_path)
+                        st.markdown("""
+                        <div style='background-color: #e6f7e6; padding: 8px; border-radius: 4px; font-size: 0.9em;'>
+                        This is the processed audio after noise reduction and filler word removal, which should sound cleaner and more professional.
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                with compare_tab2:
+                    st.markdown("<p>The waveform visualization below shows both audio tracks aligned on the same timeline. Notice how the cleaned audio (bottom) has reduced noise levels compared to the original (top).</p>", unsafe_allow_html=True)
+                    
+                    # Display the comparative waveforms with shared timeline
+                    display_waveform_comparison(st.session_state.saved_audio_path, st.session_state.saved_cleaned_audio_path)
+                    
+                    # Add annotation explaining how to interpret the waveforms
+                    st.markdown("""
+                    <div style='background-color: #e6f2ff; padding: 10px; border-radius: 4px; margin-top: 10px; font-size: 0.9em;'>
+                    <strong>How to Interpret the Waveforms:</strong>
+                    <ul>
+                      <li>Larger amplitudes (taller spikes) indicate louder sounds</li>
+                      <li>Areas where the original audio shows activity but the cleaned version doesn't are likely noise or filler words that were removed</li>
+                      <li>Use the slider to navigate to points of interest and compare the changes</li>
+                      <li>Listen to both audio samples at the same position to hear the differences</li>
+                    </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
 
         # Step 4: Create Final Video
         if st.session_state.current_step >= 3:
@@ -513,25 +716,37 @@ with main_col1:
                     add_log(f"Error displaying final video: {str(e)}")
 
 with main_col2:
-    # Video information panel
+    # Create expandable sections for the right side panel
     if st.session_state.processor is not None:
-        st.subheader("Video Information")
-        video_info = st.session_state.processor.get_video_info()
-        st.write(f"Duration: {video_info['duration']:.2f} seconds")
-        st.write(f"Resolution: {video_info['width']}x{video_info['height']}")
-        st.write(f"FPS: {video_info['fps']:.2f}")
+        with st.container():
+            st.markdown('<div class="info-card">', unsafe_allow_html=True)
+            st.subheader("Video Information")
+            video_info = st.session_state.processor.get_video_info()
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write(f"Duration: {video_info['duration']:.2f} s")
+                st.write(f"Resolution: {video_info['width']}x{video_info['height']}")
+            with col2:
+                st.write(f"FPS: {video_info['fps']:.2f}")
+            st.markdown('</div>', unsafe_allow_html=True)
         
-        # Progress indicator
-        st.subheader("Progress")
-        total_steps = 4
-        st.progress(st.session_state.current_step / total_steps)
-        st.write(f"Step {st.session_state.current_step} of {total_steps} completed")
+        # Progress indicator in a separate card
+        with st.container():
+            st.markdown('<div class="info-card">', unsafe_allow_html=True)
+            st.subheader("Progress")
+            total_steps = 4
+            st.progress(st.session_state.current_step / total_steps)
+            st.write(f"Step {st.session_state.current_step} of {total_steps} completed")
+            st.markdown('</div>', unsafe_allow_html=True)
     
-    # Show logs if enabled
-    if show_logs and st.session_state.logs:
-        st.subheader("Debug Logs")
-        log_text = "\n".join(st.session_state.logs)
-        st.text_area("Logs", log_text, height=400)
+    # Show logs in collapsible section to save space
+    if show_logs:
+        with st.expander("Debug Logs", expanded=False):
+            if st.session_state.logs:
+                log_text = "\n".join(st.session_state.logs)
+                st.text_area("", log_text, height=300)
+            else:
+                st.info("No logs available yet.")
 
 # Instructions if no file is uploaded
 if uploaded_file is None:

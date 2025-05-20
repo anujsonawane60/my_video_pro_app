@@ -9,6 +9,15 @@ from pydub import AudioSegment
 import datetime
 import time
 import shutil
+import numpy as np
+try:
+    import librosa
+    import librosa.display
+    import soundfile as sf
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    print("Librosa not available. Advanced audio alignment features will be disabled.")
 
 # Load environment variables from .env file
 load_dotenv()
@@ -789,7 +798,7 @@ class VoiceChanger:
             import traceback
             traceback.print_exc()
             return False
-    
+
     def generate_voice_from_subtitles(self, subtitle_path, voice_id=None, output_filename="output.mp3",
                                    stability=0.5, similarity_boost=0.75):
         """
@@ -816,7 +825,7 @@ class VoiceChanger:
             if not script_text:
                 print("Failed to extract text from subtitles")
                 return False
-                
+            
             print(f"Extracted script text ({len(script_text)} characters)")
             
             # Generate voice audio from the script text
@@ -834,7 +843,6 @@ class VoiceChanger:
             traceback.print_exc()
             return False
 
-
 if __name__ == "__main__":
     # Example usage
     changer = VoiceChanger()
@@ -849,3 +857,404 @@ if __name__ == "__main__":
     
     # Generate voice from text
     changer.generate_voice_from_text(text, output_filename="test_voice.mp3") 
+
+# Add the new enhanced audio synchronization functions
+class EnhancedSyncVoiceChanger(VoiceChanger):
+    """
+    Enhanced version of VoiceChanger with better synchronization techniques
+    for aligning generated audio with original timings.
+    """
+    
+    def __init__(self):
+        """Initialize the enhanced voice changer"""
+        super().__init__()
+        self.advanced_alignment = LIBROSA_AVAILABLE
+    
+    def generate_synchronized_voice(self, subtitle_path, voice_id=None, output_filename="output.mp3",
+                                  stability=0.5, similarity_boost=0.75):
+        """
+        Generate voice audio from subtitle file with enhanced synchronization.
+        
+        Args:
+            subtitle_path (str): Path to subtitle file (.srt)
+            voice_id (str): ElevenLabs voice ID (optional)
+            output_filename (str): Path to save the audio output
+            stability (float): Voice stability (0.0 to 1.0)
+            similarity_boost (float): Voice clarity (0.0 to 1.0)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Parse subtitle file with precise timing information
+            subtitle_segments = self._parse_subtitle_file(subtitle_path)
+            if not subtitle_segments:
+                print("Failed to parse subtitle file")
+                return False
+            
+            print(f"Parsed {len(subtitle_segments)} subtitle segments with precise timing")
+            
+            # Generate audio segments with precise timing anchors
+            return self._generate_sync_audio(subtitle_segments, voice_id, output_filename, stability, similarity_boost)
+            
+        except Exception as e:
+            print(f"Error in enhanced synchronized voice generation: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _parse_subtitle_file(self, subtitle_path):
+        """
+        Parse SRT subtitle file with precise timing information.
+        
+        Args:
+            subtitle_path (str): Path to subtitle file
+            
+        Returns:
+            list: List of subtitle segments with text and timing information
+        """
+        segments = []
+        
+        try:
+            with open(subtitle_path, 'r', encoding='utf-8') as f:
+                subtitle_content = f.read()
+            
+            # Regular expression to match subtitle entries with timing info
+            subtitle_pattern = re.compile(r'(\d+)\s*\n(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*\n([\s\S]*?)(?=\n\s*\n\s*\d+|\n\s*\n\s*$|$)')
+            
+            matches = subtitle_pattern.findall(subtitle_content)
+            
+            for idx, start_time, end_time, text in matches:
+                # Clean up text
+                text = text.strip()
+                text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags
+                text = re.sub(r'\s+', ' ', text)     # Normalize whitespace
+                
+                # Parse timing
+                start_ms = self.parse_srt_timing(start_time)
+                end_ms = self.parse_srt_timing(end_time)
+                
+                # Calculate duration
+                duration_ms = end_ms - start_ms
+                
+                # Store segment data
+                segment = {
+                    "id": int(idx),
+                    "text": text,
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "duration_ms": duration_ms
+                }
+                
+                segments.append(segment)
+            
+            # Sort segments by start time (just in case they're not in order)
+            segments.sort(key=lambda x: x["start_ms"])
+            
+            return segments
+            
+        except Exception as e:
+            print(f"Error parsing subtitle file: {e}")
+            traceback.print_exc()
+            return []
+    
+    def _generate_sync_audio(self, subtitle_segments, voice_id=None, output_filename="output.mp3",
+                          stability=0.5, similarity_boost=0.75):
+        """
+        Generate synchronized audio from subtitle segments.
+        
+        Args:
+            subtitle_segments (list): List of subtitle segments with timing info
+            voice_id (str): ElevenLabs voice ID
+            output_filename (str): Output file path
+            stability (float): Voice stability
+            similarity_boost (float): Voice clarity
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Calculate total text length for credit check
+            total_text = " ".join([segment["text"] for segment in subtitle_segments])
+            required_credits = self.calculate_required_credits(total_text)
+            
+            # Check available credits
+            subscription_data = self.check_user_credits()
+            if subscription_data:
+                available_chars = subscription_data.get('character_count', 0)
+                if required_credits > available_chars:
+                    print(f"Not enough credits: {available_chars} available, {required_credits} required")
+                    raise ValueError(f"Not enough ElevenLabs credits: {available_chars} available, {required_credits} required")
+            
+            # Create a temporary directory for segment audio files
+            with tempfile.TemporaryDirectory() as temp_dir:
+                segment_files = []
+                
+                # Generate audio for each segment separately
+                for i, segment in enumerate(subtitle_segments):
+                    print(f"Generating audio for segment {i+1}/{len(subtitle_segments)}: {segment['text'][:30]}...")
+                    
+                    # Generate segment audio file path
+                    segment_file = os.path.join(temp_dir, f"segment_{i:03d}.mp3")
+                    
+                    # Generate audio for this segment with precise rate control
+                    success = self._generate_segment_with_duration_control(
+                        text=segment["text"],
+                        target_duration_ms=segment["duration_ms"],
+                        voice_id=voice_id,
+                        output_filename=segment_file,
+                        stability=stability,
+                        similarity_boost=similarity_boost
+                    )
+                    
+                    if not success:
+                        print(f"Failed to generate audio for segment {i+1}")
+                        continue
+                    
+                    # Add to segment files list
+                    segment_files.append({
+                        "file": segment_file,
+                        "segment": segment
+                    })
+                
+                # If no segments were generated successfully, fail
+                if not segment_files:
+                    print("No audio segments were generated successfully")
+                    return False
+                
+                # Combine segments into final audio with precise timing
+                success = self._assemble_final_audio(segment_files, output_filename)
+                
+                return success
+                
+        except Exception as e:
+            print(f"Error generating synchronized audio: {e}")
+            traceback.print_exc()
+            return False
+    
+    def _generate_segment_with_duration_control(self, text, target_duration_ms, voice_id=None,
+                                             output_filename="output.mp3", stability=0.5, similarity_boost=0.75):
+        """
+        Generate audio for a text segment with controls to try to match the target duration.
+        
+        Args:
+            text (str): Text to generate speech for
+            target_duration_ms (int): Target duration in milliseconds
+            voice_id (str): ElevenLabs voice ID
+            output_filename (str): Output file path
+            stability (float): Voice stability
+            similarity_boost (float): Voice clarity
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Generate initial audio
+            success = self.generate_voice_from_text(
+                text=text,
+                voice_id=voice_id,
+                output_filename=output_filename,
+                stability=stability,
+                similarity_boost=similarity_boost
+            )
+            
+            if not success:
+                return False
+            
+            # Check if we need to adjust the duration
+            try:
+                # Measure actual duration
+                audio = AudioSegment.from_file(output_filename)
+                actual_duration_ms = len(audio)
+                
+                # If the durations are close enough, no need to adjust
+                duration_diff = abs(actual_duration_ms - target_duration_ms)
+                if duration_diff < 300:  # Within 300ms is acceptable
+                    return True
+                
+                print(f"Duration adjustment needed: target={target_duration_ms}ms, actual={actual_duration_ms}ms, diff={duration_diff}ms")
+                
+                # Try to adjust duration
+                if self.advanced_alignment and LIBROSA_AVAILABLE:
+                    # Use librosa for more advanced time stretching
+                    return self._adjust_audio_duration_librosa(output_filename, target_duration_ms)
+                else:
+                    # Use simpler methods
+                    return self._adjust_audio_duration_simple(output_filename, target_duration_ms, actual_duration_ms)
+                
+            except Exception as e:
+                print(f"Error adjusting audio duration: {e}")
+                return True  # Return original audio as is
+                
+        except Exception as e:
+            print(f"Error generating segment with duration control: {e}")
+            return False
+    
+    def _adjust_audio_duration_simple(self, audio_file, target_duration_ms, actual_duration_ms):
+        """
+        Adjust audio duration using simple methods (time stretching or silence padding).
+        
+        Args:
+            audio_file (str): Path to audio file
+            target_duration_ms (int): Target duration in milliseconds
+            actual_duration_ms (int): Actual duration in milliseconds
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            audio = AudioSegment.from_file(audio_file)
+            
+            # If actual is too short, we can add silence
+            if actual_duration_ms < target_duration_ms:
+                # Calculate silence to add (distribute at beginning and end)
+                silence_to_add = target_duration_ms - actual_duration_ms
+                silence_start = int(silence_to_add * 0.2)  # 20% at start
+                silence_end = silence_to_add - silence_start
+                
+                # Add silence
+                new_audio = AudioSegment.silent(duration=silence_start) + audio + AudioSegment.silent(duration=silence_end)
+                
+                # Export to file
+                new_audio.export(audio_file, format="mp3")
+                print(f"Added {silence_to_add}ms of silence ({silence_start}ms at start, {silence_end}ms at end)")
+                return True
+                
+            # If actual is too long, we need to speed up (time stretch)
+            elif actual_duration_ms > target_duration_ms:
+                # Try using PyDub's speed change
+                speed_factor = actual_duration_ms / target_duration_ms
+                
+                # Limit speed factor to avoid artifacts
+                if speed_factor > 1.5:
+                    speed_factor = 1.5
+                    print(f"Limiting speed factor to {speed_factor} to avoid artifacts")
+                
+                try:
+                    # Create a temporary file for ffmpeg output
+                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
+                        temp_path = temp_file.name
+                    
+                    # Use ffmpeg for time stretching
+                    subprocess.run([
+                        "ffmpeg", "-y", "-i", audio_file, 
+                        "-filter:a", f"atempo={speed_factor}", 
+                        "-vn", temp_path
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    # Copy back to original file
+                    shutil.copy2(temp_path, audio_file)
+                    
+                    # Clean up
+                    os.unlink(temp_path)
+                    
+                    print(f"Adjusted speed by factor {speed_factor}")
+                    return True
+                    
+                except Exception as e:
+                    print(f"Error in ffmpeg time stretching: {e}")
+                    # Just return original file if speed adjustment fails
+                    return True
+            
+            return True
+                
+        except Exception as e:
+            print(f"Error in simple audio adjustment: {e}")
+            return False
+    
+    def _adjust_audio_duration_librosa(self, audio_file, target_duration_ms):
+        """
+        Adjust audio duration using librosa's more advanced time stretching.
+        
+        Args:
+            audio_file (str): Path to audio file
+            target_duration_ms (int): Target duration in milliseconds
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Load the audio file
+            y, sr = librosa.load(audio_file, sr=None)
+            
+            # Calculate current duration
+            current_duration_sec = librosa.get_duration(y=y, sr=sr)
+            target_duration_sec = target_duration_ms / 1000.0
+            
+            # Calculate stretch factor
+            stretch_factor = target_duration_sec / current_duration_sec
+            
+            # Apply time stretching
+            y_stretched = librosa.effects.time_stretch(y, rate=1/stretch_factor)
+            
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # Save the stretched audio using soundfile instead of deprecated librosa.output.write_wav
+            sf.write(temp_path, y_stretched, sr)
+            
+            # Convert back to mp3
+            subprocess.run([
+                "ffmpeg", "-y", "-i", temp_path, "-c:a", "libmp3lame", "-q:a", "2", audio_file
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Clean up
+            os.unlink(temp_path)
+            
+            print(f"Applied advanced time stretching with factor {stretch_factor}")
+            return True
+            
+        except Exception as e:
+            print(f"Error in librosa time stretching: {e}")
+            # Fall back to simple method
+            return self._adjust_audio_duration_simple(audio_file, target_duration_ms, int(current_duration_sec * 1000))
+    
+    def _assemble_final_audio(self, segment_files, output_filename):
+        """
+        Assemble the final audio from individual segments with precise timing.
+        
+        Args:
+            segment_files (list): List of segment files with timing information
+            output_filename (str): Output file path
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            print(f"Assembling final audio from {len(segment_files)} segments...")
+            
+            # Sort segments by start time
+            segment_files.sort(key=lambda x: x["segment"]["start_ms"])
+            
+            # Create a silent audio track with the full duration
+            last_segment = segment_files[-1]["segment"]
+            full_duration_ms = last_segment["end_ms"]
+            final_audio = AudioSegment.silent(duration=full_duration_ms)
+            
+            # Overlay each segment at its exact start time
+            for i, segment_data in enumerate(segment_files):
+                segment = segment_data["segment"]
+                segment_file = segment_data["file"]
+                
+                try:
+                    # Load the segment audio
+                    segment_audio = AudioSegment.from_file(segment_file)
+                    
+                    # Overlay at the exact start time
+                    final_audio = final_audio.overlay(segment_audio, position=segment["start_ms"])
+                    
+                    print(f"Added segment {i+1} at position {segment['start_ms']}ms")
+                    
+                except Exception as e:
+                    print(f"Error overlaying segment {i+1}: {e}")
+            
+            # Export the final audio
+            final_audio.export(output_filename, format="mp3")
+            print(f"Successfully assembled final audio to {output_filename}")
+            return True
+            
+        except Exception as e:
+            print(f"Error assembling final audio: {e}")
+            traceback.print_exc()
+            return False 

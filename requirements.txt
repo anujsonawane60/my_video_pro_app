@@ -1,18 +1,1 @@
-streamlit>=1.26.0
-moviepy>=1.0.3
-whisper>=1.0.0
-torch>=2.0.0
-numpy>=1.23.5
-pydub>=0.25.1
-psutil>=5.9.0
-assemblyai>=0.5.0
-openai-whisper==20231117
-scipy==1.10.1
-pillow==10.1.0
-torchaudio==2.1.0
-noisereduce>=2.0.1
-webrtcvad>=2.0.10
-librosa>=0.10.0
-soundfile>=0.12.1 
-pysrt
-SpeechRecognition>=3.10.0
+streamlit>=1.26.0moviepy>=1.0.3whisper>=1.0.0torch>=2.0.0numpy>=1.23.5pydub>=0.25.1psutil>=5.9.0assemblyai>=0.5.0openai-whisper==20231117scipy==1.10.1pillow==10.1.0torchaudio==2.1.0noisereduce>=2.0.1webrtcvad>=2.0.10librosa>=0.10.0soundfile>=0.12.1 pysrtSpeechRecognition>=3.10.0python-dotenv>=1.0.0requests>=2.31.0
