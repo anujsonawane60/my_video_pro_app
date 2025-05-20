@@ -40,7 +40,9 @@ import {
 } from '@mui/material';
 import AudioWaveform from '../components/AudioWaveform';
 import WaveformComparison from '../components/WaveformComparison';
+import AudioComparison from '../components/AudioComparison';
 import {
+  API_URL,
   extractAudio,
   generateSubtitles,
   cleanAudio,
@@ -54,7 +56,9 @@ import {
   changeVoice,
   skipVoiceChange,
   getVoiceHistory,
-  translateSubtitles
+  translateSubtitles,
+  getAvailableAudio,
+  getAvailableSubtitles
 } from '../services/api';
 import MenuIcon from '@mui/icons-material/Menu';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
@@ -149,6 +153,10 @@ const ProcessingPage = () => {
   const [subtitleBgOpacity, setSubtitleBgOpacity] = useState(80);
   const [useDirectFfmpeg, setUseDirectFfmpeg] = useState(true);
   const [finalVideoPath, setFinalVideoPath] = useState(null);
+  const [availableAudioFiles, setAvailableAudioFiles] = useState([]);
+  const [selectedAudioId, setSelectedAudioId] = useState('cleaned');
+  const [availableSubtitleFiles, setAvailableSubtitleFiles] = useState([]);
+  const [selectedSubtitleId, setSelectedSubtitleId] = useState(null);
   
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -161,6 +169,10 @@ const ProcessingPage = () => {
   const [translatedSubtitlePath, setTranslatedSubtitlePath] = useState(null);
   const [saveTranslationLoading, setSaveTranslationLoading] = useState(false);
   const [originalSubtitleForTranslation, setOriginalSubtitleForTranslation] = useState('');
+  
+  // Audio comparison state
+  const [showAudioComparison, setShowAudioComparison] = useState(false);
+  const [comparisonData, setComparisonData] = useState(null);
   
   // Function to toggle sidebar
   const toggleSidebar = () => {
@@ -189,6 +201,9 @@ const ProcessingPage = () => {
       
       // Fetch voice history
       fetchVoiceHistory();
+      
+      // Fetch available audio files
+      fetchAvailableAudio();
     }
     
     // Cleanup function
@@ -488,7 +503,8 @@ const ProcessingPage = () => {
         voice_id: voiceCharacter,
         stability: voiceStability,
         clarity: voiceClarity,
-        subtitle_selection: subtitleSelection
+        subtitle_selection: subtitleSelection,
+        compare_with_original: true  // Enable comparison with original audio
       };
       
       // Add custom voice name if provided
@@ -557,6 +573,23 @@ const ProcessingPage = () => {
       } else {
         // Fetch latest history if not included in response
         await fetchVoiceHistory();
+      }
+      
+      // If comparison data is included, show audio comparison
+      if (response.comparison_data) {
+        setComparisonData({
+          original_audio: {
+            path: response.comparison_data.original_audio_path,
+            duration: response.comparison_data.original_duration
+          },
+          generated_audio: {
+            path: response.comparison_data.generated_audio_path,
+            duration: response.comparison_data.generated_duration,
+            voice_name: response.voice_history[response.voice_history.length - 1].voice_name
+          },
+          subtitle_timing: []
+        });
+        setShowAudioComparison(true);
       }
       
       // Clear the custom voice name field
@@ -693,6 +726,9 @@ const ProcessingPage = () => {
       // Update job
       const jobData = await getJobStatus(jobId);
       setJob(jobData);
+      
+      // Fetch available audio files after cleaning
+      fetchAvailableAudio();
     } catch (error) {
       console.error('Error cleaning audio:', error);
       setError('Failed to clean audio. Please try again.');
@@ -706,12 +742,32 @@ const ProcessingPage = () => {
     setLoading(true);
     setError(null);
     
+    console.log("Creating final video with settings:");
+    console.log("- Selected audio ID:", selectedAudioId);
+    console.log("- Selected subtitle ID:", selectedSubtitleId);
+    console.log("- Font size:", fontSize);
+    console.log("- Subtitle color:", subtitleColor);
+    console.log("- Subtitle background opacity:", subtitleBgOpacity);
+    console.log("- Use direct FFmpeg:", useDirectFfmpeg);
+    
     try {
+      // Force fetch available audio if not already set
+      if (availableAudioFiles.length === 0) {
+        await fetchAvailableAudio();
+      }
+      
+      // Force fetch available subtitles if not already set
+      if (availableSubtitleFiles.length === 0) {
+        await fetchAvailableSubtitles();
+      }
+      
       const settings = {
         font_size: fontSize,
         subtitle_color: subtitleColor,
         subtitle_bg_opacity: subtitleBgOpacity,
-        use_direct_ffmpeg: useDirectFfmpeg
+        use_direct_ffmpeg: useDirectFfmpeg,
+        audio_id: selectedAudioId || "cleaned", // Default to cleaned if nothing selected
+        subtitle_id: selectedSubtitleId || null  // Include selected subtitle ID
       };
       
       // Use edited subtitle path if available
@@ -787,6 +843,28 @@ const ProcessingPage = () => {
     */
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  
+  // Effect to fetch available audio files when job is updated
+  useEffect(() => {
+    if (jobId && (job?.status === 'audio_cleaned' || job?.status === 'completed' || job?.voice_history?.length > 0)) {
+      console.log("Job data changed, fetching available audio files");
+      fetchAvailableAudio();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, job?.status, job?.voice_history?.length]);
+  
+  // Effect to fetch available audio files when moving to final video step
+  useEffect(() => {
+    if (activeStep === 5) {
+      console.log("Moved to Step 5, fetching available audio files and subtitles");
+      // Add a slight delay to ensure job data is updated
+      setTimeout(() => {
+        fetchAvailableAudio();
+        fetchAvailableSubtitles();
+      }, 500);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeStep]);
   
   // Handle translate subtitles
   const handleTranslateSubtitles = async () => {
@@ -1292,20 +1370,24 @@ const ProcessingPage = () => {
         )}
         
         {voiceChangedAudioPath && (
-          <Box sx={{ my: 3 }}>
-            <Typography variant="subtitle2" gutterBottom>Preview Changed Voice:</Typography>
-            <audio 
-              controls 
-              src={getFileUrl(voiceChangedAudioPath)} 
-              style={{ width: '100%' }} 
-              key={voiceChangedAudioPath} // Force audio player to reload when source changes
-            />
-            <Typography variant="caption" color="text.secondary">
-              {voiceHistory.length > 0 ? `${voiceHistory.length} voice(s) generated. Current voice: ${
-                voiceHistory[voiceHistory.length-1]?.voice_name || 'Unknown'
-              }` : 'No voice history available'}
-            </Typography>
-          </Box>
+          <>
+            <Box sx={{ my: 3 }}>
+              <Typography variant="subtitle2" gutterBottom>Preview Changed Voice:</Typography>
+              <audio 
+                controls 
+                src={getFileUrl(voiceChangedAudioPath)} 
+                style={{ width: '100%' }} 
+                key={voiceChangedAudioPath} // Force audio player to reload when source changes
+              />
+              <Typography variant="caption" color="text.secondary">
+                {voiceHistory.length > 0 ? `${voiceHistory.length} voice(s) generated. Current voice: ${
+                  voiceHistory[voiceHistory.length-1]?.voice_name || 'Unknown'
+                }` : 'No voice history available'}
+              </Typography>
+            </Box>
+            
+            {/* Waveform comparison now added directly to the main component */}
+          </>
         )}
         
         {/* Voice History */}
@@ -1323,36 +1405,62 @@ const ProcessingPage = () => {
             </Box>
             
             {showVoiceHistory && (
-              <List dense sx={{ bgcolor: 'background.paper', border: '1px solid #eee', borderRadius: 1 }}>
-                {voiceHistory.map((voice, index) => (
-                  <ListItem 
-                    key={voice.timestamp || index}
-                    secondaryAction={
-                      <IconButton 
-                        edge="end" 
-                        onClick={() => {
-                          // Add cache busting to force reload
-                          const cacheBuster = new Date().getTime();
-                          setVoiceChangedAudioPath(`${voice.url_path}?t=${cacheBuster}`);
-                        }}
-                      >
-                        <PlayArrowIcon />
-                      </IconButton>
-                    }
-                  >
-                    <ListItemIcon>
-                      <RecordVoiceOverIcon />
-                    </ListItemIcon>
-                    <ListItemText 
-                      primary={voice.voice_name || `Voice ${index + 1}`} 
-                      secondary={`Stability: ${voice.stability}, Clarity: ${voice.clarity}`}
-                    />
-                  </ListItem>
-                ))}
-              </List>
+              <>
+                <Grid container spacing={2}>
+                  {voiceHistory.map((voice, index) => (
+                    <Grid item xs={12} sm={6} md={4} key={voice.timestamp || index}>
+                      <Card variant="outlined">
+                        <CardContent>
+                          <Typography variant="subtitle1">
+                            {voice.voice_name || `Voice ${index + 1}`}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Stability: {voice.stability.toFixed(2)}, Clarity: {voice.clarity.toFixed(2)}
+                          </Typography>
+                          
+                          <Box sx={{ mt: 2, mb: 2 }}>
+                            <audio
+                              controls
+                              style={{ width: '100%' }}
+                              src={`${API_URL}${voice.url_path}`}
+                            />
+                          </Box>
+                          
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            <Button 
+                              size="small" 
+                              variant="outlined" 
+                              onClick={() => {
+                                // Add cache busting to force reload
+                                const cacheBuster = new Date().getTime();
+                                setVoiceChangedAudioPath(`${voice.url_path}?t=${cacheBuster}`);
+                              }}
+                              startIcon={<PlayArrowIcon />}
+                            >
+                              Use This Voice
+                            </Button>
+                            
+                            <Button 
+                              size="small" 
+                              variant="outlined" 
+                              color="primary"
+                              onClick={() => handleCompareAudio(index)}
+                              startIcon={<CompareIcon />}
+                            >
+                              Compare
+                            </Button>
+                          </Box>
+                        </CardContent>
+                      </Card>
+                    </Grid>
+                  ))}
+                </Grid>
+              </>
             )}
           </Box>
         )}
+        
+        {/* No longer needed as we're using WaveformComparison directly in the UI */}
 
         <Box sx={{ mt: 4, display: 'flex', justifyContent: 'space-between' }}>
           <Button 
@@ -1534,59 +1642,184 @@ const ProcessingPage = () => {
   
   // Render final video creator section
   const renderFinalVideoCreator = () => {
+    // Debug logging
+    console.log("Rendering final video creator, availableAudioFiles:", availableAudioFiles);
+    console.log("Selected audio ID:", selectedAudioId);
+    console.log("Available subtitle files:", availableSubtitleFiles);
+    console.log("Selected subtitle ID:", selectedSubtitleId);
+    
+    // Fetch data if needed
+    if (activeStep === 5 && availableAudioFiles.length === 0) {
+      console.log("No audio files available in renderFinalVideoCreator, fetching now...");
+      fetchAvailableAudio();
+    }
+    
+    if (activeStep === 5 && availableSubtitleFiles.length === 0) {
+      console.log("No subtitle files available in renderFinalVideoCreator, fetching now...");
+      fetchAvailableSubtitles();
+    }
+    
     return (
       <Paper elevation={3} sx={{ p: 2, mb: 3 }}>
-        <Typography variant="h6" gutterBottom>Step 6: Create Final Video</Typography>
+        <Typography variant="h6" gutterBottom>Step 5: Create Final Video</Typography>
         <Typography variant="body2" color="text.secondary" paragraph>
-          Create the final video with clean audio and subtitles.
+          Create the final video with selected audio and subtitles.
         </Typography>
         
-        <Grid container spacing={2} sx={{ mb: 2 }}>
-          <Grid item xs={12} sm={6}>
-            <Typography variant="subtitle2" gutterBottom>
-              Font Size: {fontSize}
-            </Typography>
-            <Slider
-              value={fontSize}
-              onChange={(_, value) => setFontSize(value)}
-              min={18}
-              max={36}
-              step={1}
-              disabled={loading || activeStep > 5}
-            />
-          </Grid>
+        {/* Audio and Subtitle Selection Section */}
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 2,
+            mb: 3,
+            backgroundColor: 'rgba(0, 0, 0, 0.02)',
+            borderColor: 'primary.light'
+          }}
+        >
+          <Typography variant="h6" color="primary" gutterBottom>
+            Select Audio and Subtitles
+          </Typography>
           
-          <Grid item xs={12} sm={6}>
-            <FormControl fullWidth>
-              <Typography variant="subtitle2" gutterBottom>
-                Subtitle Color:
+          <Grid container spacing={2} sx={{ mb: 2 }}>
+            {/* Audio Selection */}
+            <Grid item xs={12} sm={6}>
+              <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                Select Audio Track:
               </Typography>
-              <Select
-                value={subtitleColor}
-                onChange={(e) => setSubtitleColor(e.target.value)}
-                disabled={loading || activeStep > 5}
-              >
-                <MenuItem value="white">White</MenuItem>
-                <MenuItem value="yellow">Yellow</MenuItem>
-                <MenuItem value="cyan">Cyan</MenuItem>
-              </Select>
-            </FormControl>
+              <FormControl fullWidth>
+                <Select
+                  value={selectedAudioId || ''}
+                  onChange={(e) => setSelectedAudioId(e.target.value)}
+                  disabled={loading || activeStep > 5}
+                  sx={{ mb: 1 }}
+                >
+                  {availableAudioFiles && availableAudioFiles.length > 0 ? (
+                    availableAudioFiles.map((audio) => (
+                      <MenuItem key={audio.id} value={audio.id}>
+                        {audio.name} {audio.type === 'voice_changed' ? '(Voice Changed)' : 
+                          audio.type === 'cleaned' ? '(Cleaned)' : '(Original)'}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem value="" disabled>No audio files available</MenuItem>
+                  )}
+                </Select>
+                <FormHelperText>Select the audio track to use in the final video</FormHelperText>
+                
+                {/* Debug button to force load audio files */}
+                <Button 
+                  size="small" 
+                  variant="outlined" 
+                  onClick={fetchAvailableAudio}
+                  sx={{ mt: 1 }}
+                >
+                  Refresh Audio Options
+                </Button>
+              </FormControl>
+            </Grid>
+            
+            {/* Subtitle Selection */}
+            <Grid item xs={12} sm={6}>
+              <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                Select Subtitles:
+              </Typography>
+              <FormControl fullWidth>
+                <Select
+                  value={selectedSubtitleId || ''}
+                  onChange={(e) => setSelectedSubtitleId(e.target.value)}
+                  disabled={loading || activeStep > 5}
+                  sx={{ mb: 1 }}
+                >
+                  <MenuItem value="">No Subtitles</MenuItem>
+                  {availableSubtitleFiles && availableSubtitleFiles.length > 0 ? (
+                    availableSubtitleFiles.map((subtitle) => (
+                      <MenuItem key={subtitle.id} value={subtitle.id}>
+                        {subtitle.name} 
+                        {subtitle.language !== 'en' ? ` (${subtitle.language === 'mr' ? 'Marathi' : 
+                          subtitle.language === 'hi' ? 'Hindi' : subtitle.language})` : ''}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem value="" disabled>No subtitle files available</MenuItem>
+                  )}
+                </Select>
+                <FormHelperText>Select the subtitles to use in the final video</FormHelperText>
+                
+                {/* Debug button to force load subtitle files */}
+                <Button 
+                  size="small" 
+                  variant="outlined" 
+                  onClick={fetchAvailableSubtitles}
+                  sx={{ mt: 1 }}
+                >
+                  Refresh Subtitle Options
+                </Button>
+              </FormControl>
+            </Grid>
           </Grid>
+        </Paper>
+        
+        {/* Subtitle Appearance Settings */}
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 2,
+            mb: 3,
+            backgroundColor: 'rgba(0, 0, 0, 0.02)',
+            borderColor: 'secondary.light'
+          }}
+        >
+          <Typography variant="h6" color="secondary" gutterBottom>
+            Subtitle Appearance
+          </Typography>
           
-          <Grid item xs={12}>
-            <Typography variant="subtitle2" gutterBottom>
-              Background Opacity: {subtitleBgOpacity}%
-            </Typography>
-            <Slider
-              value={subtitleBgOpacity}
-              onChange={(_, value) => setSubtitleBgOpacity(value)}
-              min={0}
-              max={100}
-              step={5}
-              disabled={loading || activeStep > 5}
-            />
+          <Grid container spacing={2}>
+            <Grid item xs={12} sm={6}>
+              <Typography variant="subtitle2" gutterBottom>
+                Font Size: {fontSize}
+              </Typography>
+              <Slider
+                value={fontSize}
+                onChange={(_, value) => setFontSize(value)}
+                min={18}
+                max={36}
+                step={1}
+                disabled={loading || activeStep > 5 || !selectedSubtitleId}
+              />
+            </Grid>
+            
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth>
+                <Typography variant="subtitle2" gutterBottom>
+                  Subtitle Color:
+                </Typography>
+                <Select
+                  value={subtitleColor}
+                  onChange={(e) => setSubtitleColor(e.target.value)}
+                  disabled={loading || activeStep > 5 || !selectedSubtitleId}
+                >
+                  <MenuItem value="white">White</MenuItem>
+                  <MenuItem value="yellow">Yellow</MenuItem>
+                  <MenuItem value="cyan">Cyan</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            
+            <Grid item xs={12}>
+              <Typography variant="subtitle2" gutterBottom>
+                Background Opacity: {subtitleBgOpacity}%
+              </Typography>
+              <Slider
+                value={subtitleBgOpacity}
+                onChange={(_, value) => setSubtitleBgOpacity(value)}
+                min={0}
+                max={100}
+                step={5}
+                disabled={loading || activeStep > 5 || !selectedSubtitleId}
+              />
+            </Grid>
           </Grid>
-        </Grid>
+        </Paper>
         
         <FormControlLabel
           control={
@@ -1615,7 +1848,7 @@ const ProcessingPage = () => {
               variant="contained"
               color="primary"
               onClick={handleCreateFinalVideo}
-              disabled={loading}
+              disabled={loading || !selectedAudioId}
               startIcon={loading ? <CircularProgress size={24} /> : null}
             >
               {loading ? 'Creating...' : 'Create Final Video'}
@@ -1763,6 +1996,92 @@ const ProcessingPage = () => {
         </ListItem>
       </List>
     );
+  };
+
+  // Handle audio comparison
+  const handleCompareAudio = async (voiceIndex = 0) => {
+    try {
+      setLoading(true);
+      const response = await fetch(`${API_URL}/compare-audio/${jobId}/${voiceIndex}`);
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to get comparison data');
+      }
+      
+      const data = await response.json();
+      setComparisonData(data);
+      setShowAudioComparison(true);
+    } catch (error) {
+      setError(`Error comparing audio: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Fetch available audio files
+  const fetchAvailableAudio = async () => {
+    if (!jobId) return;
+    
+    console.log("Fetching available audio files...");
+    
+    try {
+      const response = await getAvailableAudio(jobId);
+      console.log("Available audio response:", response);
+      
+      if (response && response.available_audio) {
+        console.log(`Found ${response.available_audio.length} audio files:`, response.available_audio);
+        setAvailableAudioFiles(response.available_audio);
+        
+        // If we have cleaned audio, select it by default
+        const hasCleanedAudio = response.available_audio.some(a => a.id === 'cleaned');
+        if (hasCleanedAudio) {
+          setSelectedAudioId('cleaned');
+          console.log("Selected cleaned audio by default");
+        } else if (response.available_audio.length > 0) {
+          setSelectedAudioId(response.available_audio[0].id);
+          console.log(`Selected first available audio: ${response.available_audio[0].id}`);
+        }
+      } else {
+        console.warn("No available_audio property in response:", response);
+      }
+    } catch (error) {
+      console.error('Error fetching available audio files:', error);
+    }
+  };
+
+  // Fetch available subtitle files
+  const fetchAvailableSubtitles = async () => {
+    if (!jobId) return;
+    
+    console.log("Fetching available subtitle files...");
+    
+    try {
+      const response = await getAvailableSubtitles(jobId);
+      console.log("Available subtitles response:", response);
+      
+      if (response && response.available_subtitles) {
+        console.log(`Found ${response.available_subtitles.length} subtitle files:`, response.available_subtitles);
+        setAvailableSubtitleFiles(response.available_subtitles);
+        
+        // If we have edited subtitles, select them by default, otherwise use original
+        const hasEditedSubtitles = response.available_subtitles.some(s => s.id === 'edited');
+        if (hasEditedSubtitles) {
+          setSelectedSubtitleId('edited');
+          console.log("Selected edited subtitles by default");
+        } else if (response.available_subtitles.some(s => s.id === 'original')) {
+          setSelectedSubtitleId('original');
+          console.log("Selected original subtitles by default");
+        } else if (response.available_subtitles.length > 0) {
+          setSelectedSubtitleId(response.available_subtitles[0].id);
+          console.log(`Selected first available subtitles: ${response.available_subtitles[0].id}`);
+        }
+      } else {
+        console.warn("No available_subtitles property in response:", response);
+      }
+    } catch (error) {
+      console.error('Error fetching available subtitle files:', error);
+    }
   };
 
   return (
@@ -2525,6 +2844,28 @@ const ProcessingPage = () => {
                   </Box>
                 )}
                 
+                {/* Always try to show waveform comparison for voice changer */}
+                {activeStep >= 3 && (
+                  <>
+                    <Typography variant="h6" gutterBottom sx={{ mt: 3 }}>Audio Waveform Comparison</Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Compare the original audio with the AI-generated voice. Use the controls to check if timing is synchronized.
+                    </Typography>
+                    
+                    {audioPath && voiceChangedAudioPath ? (
+                      <WaveformComparison
+                        originalAudioPath={audioPath}
+                        cleanedAudioPath={voiceChangedAudioPath}
+                      />
+                    ) : (
+                      <Typography color="error">
+                        Audio files not available yet. Please generate voice first. 
+                        Debug: Original = {audioPath || "none"}, Voice Changed = {voiceChangedAudioPath || "none"}
+                      </Typography>
+                    )}
+                  </>
+                )}
+                
                 {voiceChangedAudioPath && (
                   <Box sx={{ mt: 2, mb: 4, p: 2, bgcolor: 'background.paper', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
                     <Typography variant="subtitle2" gutterBottom>Current Voice Preview:</Typography>
@@ -2750,6 +3091,99 @@ const ProcessingPage = () => {
               <>
                 {/* Final video settings */}
                 <Box sx={{ mb: 3 }}>
+                  {/* Audio and Subtitle Selection */}
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      p: 2,
+                      mb: 3,
+                      backgroundColor: 'rgba(0, 0, 0, 0.02)',
+                      borderColor: 'primary.light'
+                    }}
+                  >
+                    <Typography variant="h6" color="primary" gutterBottom>
+                      Select Audio and Subtitles
+                    </Typography>
+                    
+                    <Grid container spacing={2} sx={{ mb: 2 }}>
+                      {/* Audio Selection */}
+                      <Grid item xs={12} sm={6}>
+                        <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                          Select Audio Track:
+                        </Typography>
+                        <FormControl fullWidth>
+                          <Select
+                            value={selectedAudioId || ''}
+                            onChange={(e) => setSelectedAudioId(e.target.value)}
+                            disabled={loading || activeStep > 5}
+                            sx={{ mb: 1 }}
+                          >
+                            {availableAudioFiles && availableAudioFiles.length > 0 ? (
+                              availableAudioFiles.map((audio) => (
+                                <MenuItem key={audio.id} value={audio.id}>
+                                  {audio.name} {audio.type === 'voice_changed' ? '(Voice Changed)' : 
+                                    audio.type === 'cleaned' ? '(Cleaned)' : '(Original)'}
+                                </MenuItem>
+                              ))
+                            ) : (
+                              <MenuItem value="" disabled>No audio files available</MenuItem>
+                            )}
+                          </Select>
+                          <FormHelperText>Select the audio track to use in the final video</FormHelperText>
+                          
+                          {/* Debug button to force load audio files */}
+                          <Button 
+                            size="small" 
+                            variant="outlined" 
+                            onClick={fetchAvailableAudio}
+                            sx={{ mt: 1 }}
+                          >
+                            Refresh Audio Options
+                          </Button>
+                        </FormControl>
+                      </Grid>
+                      
+                      {/* Subtitle Selection */}
+                      <Grid item xs={12} sm={6}>
+                        <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                          Select Subtitles:
+                        </Typography>
+                        <FormControl fullWidth>
+                          <Select
+                            value={selectedSubtitleId || ''}
+                            onChange={(e) => setSelectedSubtitleId(e.target.value)}
+                            disabled={loading || activeStep > 5}
+                            sx={{ mb: 1 }}
+                          >
+                            <MenuItem value="">No Subtitles</MenuItem>
+                            {availableSubtitleFiles && availableSubtitleFiles.length > 0 ? (
+                              availableSubtitleFiles.map((subtitle) => (
+                                <MenuItem key={subtitle.id} value={subtitle.id}>
+                                  {subtitle.name} 
+                                  {subtitle.language !== 'en' ? ` (${subtitle.language === 'mr' ? 'Marathi' : 
+                                    subtitle.language === 'hi' ? 'Hindi' : subtitle.language})` : ''}
+                                </MenuItem>
+                              ))
+                            ) : (
+                              <MenuItem value="" disabled>No subtitle files available</MenuItem>
+                            )}
+                          </Select>
+                          <FormHelperText>Select the subtitles to use in the final video</FormHelperText>
+                          
+                          {/* Debug button to force load subtitle files */}
+                          <Button 
+                            size="small" 
+                            variant="outlined" 
+                            onClick={fetchAvailableSubtitles}
+                            sx={{ mt: 1 }}
+                          >
+                            Refresh Subtitle Options
+                          </Button>
+                        </FormControl>
+                      </Grid>
+                    </Grid>
+                  </Paper>
+
                   <Typography variant="subtitle2" gutterBottom>
                     Subtitle Settings
                   </Typography>
@@ -2827,7 +3261,7 @@ const ProcessingPage = () => {
                       variant="contained"
                       color="primary"
                       onClick={handleCreateFinalVideo}
-                      disabled={loading}
+                      disabled={loading || !selectedAudioId}
                       startIcon={loading ? <CircularProgress size={24} /> : null}
                     >
                       {loading ? 'Creating...' : 'Create Final Video'}
@@ -3111,6 +3545,8 @@ const ProcessingPage = () => {
           <Button onClick={() => setShowVoiceComparisonModal(false)}>Close</Button>
         </DialogActions>
       </Dialog>
+      
+      {/* Note: AudioComparison is now integrated directly in the main UI, no need for duplicate */}
     </Box>
   );
 };

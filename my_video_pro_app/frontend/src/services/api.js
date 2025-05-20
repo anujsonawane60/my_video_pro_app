@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Use the environment variable or fall back to default
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+export const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 // Create axios instance with timeout and error handling
 const api = axios.create({
@@ -319,6 +319,26 @@ export const translateSubtitles = async (jobId, settings) => {
   }
 };
 
+export const getAvailableAudio = async (jobId) => {
+  try {
+    const response = await api.get(`/available-audio/${jobId}`);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching available audio files:', error);
+    throw error;
+  }
+};
+
+export const getAvailableSubtitles = async (jobId) => {
+  try {
+    const response = await api.get(`/available-subtitles/${jobId}`);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching available subtitle files:', error);
+    throw error;
+  }
+};
+
 const apiService = {
   uploadVideo,
   extractAudio,
@@ -334,7 +354,9 @@ const apiService = {
   getFileUrl,
   getSubtitleContent,
   getVoiceHistory,
-  translateSubtitles
+  translateSubtitles,
+  getAvailableAudio,
+  getAvailableSubtitles
 };
 
 export default apiService; 
