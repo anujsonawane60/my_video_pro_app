@@ -152,7 +152,10 @@ class VoiceChanger:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
             subscription_data = response.json()
-            print(f"User has {subscription_data.get('character_count', 0)} characters remaining")
+            character_limit = subscription_data.get('character_limit', 0)
+            characters_used = subscription_data.get('character_count', 0)
+            available_chars = character_limit - characters_used
+            print(f"User has {available_chars} characters remaining (used {characters_used} of {character_limit})")
             return subscription_data
         except requests.exceptions.RequestException as e:
             print(f"Error checking user credits: {e}")
@@ -195,7 +198,10 @@ class VoiceChanger:
         
         subscription_data = self.check_user_credits()
         if subscription_data:
-            available_chars = subscription_data.get('character_count', 0)
+            character_limit = subscription_data.get('character_limit', 0)
+            characters_used = subscription_data.get('character_count', 0)
+            available_chars = character_limit - characters_used
+            
             if required_credits > available_chars:
                 print(f"Not enough credits: {available_chars} available, {required_credits} required")
                 raise ValueError(f"Not enough ElevenLabs credits: {available_chars} available, {required_credits} required. Please upgrade your plan or reduce text length.")
@@ -539,7 +545,10 @@ class VoiceChanger:
                 # Check credits before starting
                 subscription_data = self.check_user_credits()
                 if subscription_data:
-                    available_chars = subscription_data.get('character_count', 0)
+                    character_limit = subscription_data.get('character_limit', 0)
+                    characters_used = subscription_data.get('character_count', 0)
+                    available_chars = character_limit - characters_used
+                    
                     if required_credits > available_chars:
                         print(f"Not enough credits: {available_chars} available, {required_credits} required")
                         raise ValueError(f"Not enough ElevenLabs credits: {available_chars} available, {required_credits} required. Please upgrade your plan or reduce text length.")
@@ -981,7 +990,10 @@ class EnhancedSyncVoiceChanger(VoiceChanger):
             # Check available credits
             subscription_data = self.check_user_credits()
             if subscription_data:
-                available_chars = subscription_data.get('character_count', 0)
+                character_limit = subscription_data.get('character_limit', 0)
+                characters_used = subscription_data.get('character_count', 0)
+                available_chars = character_limit - characters_used
+                
                 if required_credits > available_chars:
                     print(f"Not enough credits: {available_chars} available, {required_credits} required")
                     raise ValueError(f"Not enough ElevenLabs credits: {available_chars} available, {required_credits} required")

@@ -17,7 +17,10 @@ def main():
         subscription_data = voice_changer.check_user_credits()
         
         if subscription_data:
-            available_chars = subscription_data.get('character_count', 0)
+            character_limit = subscription_data.get('character_limit', 0)
+            characters_used = subscription_data.get('character_count', 0)
+            available_chars = character_limit - characters_used
+            
             print(f"\nElevenLabs API Key: {voice_changer.api_key[:5]}...{voice_changer.api_key[-5:] if voice_changer.api_key else ''}")
             print(f"Available characters: {available_chars}")
             
@@ -33,9 +36,8 @@ def main():
                 
             # Print quota information if available
             if 'character_limit' in subscription_data:
-                limit = subscription_data.get('character_limit', 0)
-                print(f"Character limit: {limit}")
-                print(f"Usage: {limit - available_chars}/{limit} ({(limit - available_chars) / limit * 100:.1f}%)")
+                print(f"Character limit: {character_limit}")
+                print(f"Usage: {characters_used}/{character_limit} ({(characters_used / character_limit * 100 if character_limit else 0):.1f}%)")
         else:
             print("Failed to retrieve subscription data. Please check your API key.")
             

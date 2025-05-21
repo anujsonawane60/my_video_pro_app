@@ -354,7 +354,12 @@ async def change_voice(
                 
             # Check available credits
             subscription_data = voice_changer.check_user_credits()
-            available_credits = subscription_data.get('character_count', 0) if subscription_data else 0
+            if subscription_data:
+                character_limit = subscription_data.get('character_limit', 0)
+                characters_used = subscription_data.get('character_count', 0)
+                available_credits = character_limit - characters_used
+            else:
+                available_credits = 0
             required_credits = len(script_text)
             
             print(f"Available credits: {available_credits}, Required: {required_credits}")
