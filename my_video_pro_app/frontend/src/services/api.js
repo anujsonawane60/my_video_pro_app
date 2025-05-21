@@ -70,7 +70,7 @@ export const generateSubtitles = async (jobId, settings) => {
   try {
     // Generate subtitles can take a long time, so use a longer timeout
     const response = await api.post(`/generate-subtitles/${jobId}`, formData, {
-      timeout: 120000, // 2 minutes timeout for subtitle generation
+      timeout: 300000, // 5 minutes timeout for subtitle generation, especially for Marathi
       headers: {
         'Content-Type': 'multipart/form-data',
       }

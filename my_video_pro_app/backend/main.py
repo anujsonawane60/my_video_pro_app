@@ -5,7 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from fastapi import FastAPI, File, UploadFile, Form, BackgroundTasks, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, Response, Depends, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -14,6 +14,7 @@ import uvicorn
 from dotenv import load_dotenv
 import requests
 import re
+import sys
 
 # Load environment variables from .env file
 load_dotenv()
@@ -175,15 +176,116 @@ async def extract_audio(job_id: str):
             content={"job_id": job_id, "status": "failed", "error": str(e)}
         )
 
+# Background task to generate subtitles
+def _run_subtitle_generation(job_id: str, transcription_method: str, language: str, whisper_model_size: str, assemblyai_api_key: str = None):
+    """Run subtitle generation in background"""
+    try:
+        job = processing_jobs[job_id]
+        video_path = job["video_path"]
+        output_dir = job["output_dir"]
+        
+        # Initialize VideoProcessor with appropriate settings
+        use_assemblyai = transcription_method == "assemblyai"
+        processor = VideoProcessor(
+            video_path,
+            whisper_model_size=whisper_model_size,
+            use_assemblyai=use_assemblyai,
+            assemblyai_api_key=assemblyai_api_key,
+            debug_mode=True,
+            language=language
+        )
+        
+        # Generate subtitles
+        subtitle_path = processor.generate_subtitles()
+        
+        # Copy the subtitle file to the job output directory
+        output_filename = f"subtitles_{job_id}.srt"
+        output_path = os.path.join(output_dir, output_filename)
+        shutil.copy2(subtitle_path, output_path)
+        
+        # Read the subtitle content for verification
+        try:
+            with open(output_path, 'r', encoding='utf-8') as f:
+                subtitle_content = f.read()
+                content_length = len(subtitle_content)
+                print(f"Generated subtitle content length: {content_length} bytes")
+        except Exception as read_error:
+            print(f"Error reading generated subtitles: {read_error}")
+        
+        # Update job status
+        job["steps"]["generate_subtitles"]["status"] = "completed"
+        job["steps"]["generate_subtitles"]["path"] = output_path
+        job["status"] = "subtitles_generated"
+        
+    except Exception as e:
+        print(f"Error in background subtitle generation: {e}")
+        print(traceback.format_exc())
+        if job_id in processing_jobs:
+            job = processing_jobs[job_id]
+            job["steps"]["generate_subtitles"]["status"] = "failed"
+            job["steps"]["generate_subtitles"]["error"] = str(e)
+            job["status"] = "subtitle_generation_failed"
+
+# Function to handle Marathi subtitle generation in background
+async def _generate_subtitles_background(
+    job_id: str,
+    transcription_method: str,
+    language: str,
+    whisper_model_size: str,
+    assemblyai_api_key: str = None,
+    background_tasks: BackgroundTasks = None
+):
+    """Generate Marathi subtitles in the background to prevent timeout"""
+    if job_id not in processing_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job = processing_jobs[job_id]
+    
+    # Initially update job status to in-progress
+    job["steps"]["generate_subtitles"]["status"] = "in_progress"
+    job["status"] = "generating_subtitles"
+    
+    # Add the background task
+    if background_tasks:
+        background_tasks.add_task(
+            _run_subtitle_generation,
+            job_id=job_id,
+            transcription_method=transcription_method,
+            language=language,
+            whisper_model_size=whisper_model_size,
+            assemblyai_api_key=assemblyai_api_key
+        )
+    
+    # Return immediately with a status message
+    return {
+        "job_id": job_id, 
+        "status": "generating_subtitles", 
+        "message": "Marathi subtitle generation started. This may take several minutes. Check job status for updates."
+    }
+
 @app.post("/generate-subtitles/{job_id}")
 async def generate_subtitles(
     job_id: str,
     transcription_method: str = Form("whisper"),
     language: str = Form("en"),
     whisper_model_size: str = Form("base"),
-    assemblyai_api_key: str = Form(None)
+    assemblyai_api_key: str = Form(None),
+    background_tasks: BackgroundTasks = None,
 ):
     """Generate subtitles for the video"""
+    # For Marathi subtitles, we need to increase the server-side timeout
+    # by handling this in a background task for longer-running operations
+    if language == "mr" and background_tasks is not None:
+        return await _generate_subtitles_background(
+            job_id=job_id,
+            transcription_method=transcription_method,
+            language=language,
+            whisper_model_size=whisper_model_size,
+            assemblyai_api_key=assemblyai_api_key,
+            background_tasks=background_tasks
+        )
+    
+    # For non-Marathi languages, continue with normal processing
     if job_id not in processing_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
         

@@ -2720,7 +2720,7 @@ const ProcessingPage = () => {
                     </Box>
                     
                     <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
-                      <Button
+                      {/* <Button
                         variant="outlined"
                         color="primary"
                         onClick={handleSaveTranslatedSubtitles}
@@ -2737,7 +2737,7 @@ const ProcessingPage = () => {
                         disabled={translationLoading || saveTranslationLoading}
                       >
                         Download Translation
-                      </Button>
+                      </Button> */}
                     </Box>
                   </>
                 )}
@@ -2922,7 +2922,7 @@ const ProcessingPage = () => {
                     >
                       Skip Voice Change
                     </Button>
-                    <Button 
+                    {/* <Button 
                       variant="contained" 
                       color="primary"
                       onClick={handleChangeVoice}
@@ -2930,7 +2930,7 @@ const ProcessingPage = () => {
                       startIcon={loading ? <CircularProgress size={24} /> : <RecordVoiceOverIcon />}
                     >
                       {loading ? 'Generating Voice...' : voiceHistory.length > 0 ? 'Regenerate Voice' : 'Generate Voice'}
-                    </Button>
+                    </Button> */}
                   </Box>
                 </Box>
               </>
@@ -3196,7 +3196,7 @@ const ProcessingPage = () => {
                       <Slider
                         value={fontSize}
                         onChange={(_, value) => setFontSize(value)}
-                        min={18}
+                        min={10}
                         max={36}
                         step={1}
                         disabled={loading || activeStep > 5}

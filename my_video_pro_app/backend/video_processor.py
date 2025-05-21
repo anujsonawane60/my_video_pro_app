@@ -71,6 +71,7 @@ class VideoProcessor:
         self.subtitle_color = "white"
         self.subtitle_bg_opacity = 80  # 0-100
         self.use_direct_ffmpeg = True
+        self.subtitle_font = "Arial"
         
         # Load the video file
         self.video = VideoFileClip(video_path)
@@ -1178,13 +1179,18 @@ class VideoProcessor:
             print("ERROR - No audio files could be found or extracted")
             raise FileNotFoundError("No audio found. Please extract audio first.")
         
-        # Which subtitle file to use
-        subtitle_path_to_use = custom_subtitle_path if custom_subtitle_path else self.subtitles_path
-        
-        if not os.path.exists(subtitle_path_to_use):
-            print(f"Warning: Subtitle file not found at {subtitle_path_to_use}. Video will not have subtitles.")
+        # Which subtitle file to use - verify it exists
+        subtitle_path_to_use = None
+        if custom_subtitle_path and os.path.exists(custom_subtitle_path) and os.path.getsize(custom_subtitle_path) > 0:
+            subtitle_path_to_use = custom_subtitle_path
+            print(f"Using custom subtitle file: {subtitle_path_to_use}")
+        elif os.path.exists(self.subtitles_path) and os.path.getsize(self.subtitles_path) > 0:
+            subtitle_path_to_use = self.subtitles_path
+            print(f"Using default subtitle file: {subtitle_path_to_use}")
         else:
-            print(f"Using subtitle file: {subtitle_path_to_use}")
+            print(f"Warning: No valid subtitle file found. Video will not have subtitles.")
+        
+        if subtitle_path_to_use:
             # Debug: Read first few lines of subtitle file to verify content
             try:
                 with open(subtitle_path_to_use, 'r', encoding='utf-8') as f:
@@ -1196,7 +1202,7 @@ class VideoProcessor:
         
         try:
             # Try using direct FFmpeg approach first - more reliable for subtitle integration
-            if self.use_direct_ffmpeg and os.path.exists(subtitle_path_to_use):
+            if self.use_direct_ffmpeg and subtitle_path_to_use:
                 print("Using direct FFmpeg approach for better subtitle integration")
                 try:
                     output_path = os.path.join(self.output_dir, "ffmpeg_final_video.mp4")
@@ -1206,7 +1212,10 @@ class VideoProcessor:
                     subtitle_path_ffmpeg = subtitle_path_norm.replace('\\', '/')  # FFmpeg prefers forward slashes
                     print(f"Formatted subtitle path for FFmpeg: {subtitle_path_ffmpeg}")
                     
-                    # Prepare FFmpeg command for subtitle burning
+                    # Create FFmpeg subtitle styling options based on user preferences
+                    subtitle_style = f"fontsize={self.subtitle_font_size},fontcolor={self.subtitle_color},alpha={self.subtitle_bg_opacity/100}"
+                    print(f"Using subtitle style: {subtitle_style}")
+                    
                     command = [
                         "ffmpeg", "-y",
                         "-i", self.video_path,     # Input video
@@ -1217,7 +1226,7 @@ class VideoProcessor:
                         "-crf", "23",              # Quality setting
                         "-c:a", "aac",             # Convert audio to AAC
                         "-b:a", "192k",            # Audio bitrate
-                        "-vf", f"subtitles={subtitle_path_ffmpeg}",  # Use prepared path
+                        "-vf", f"subtitles={subtitle_path_ffmpeg}:force_style='{subtitle_style}'",  # Use prepared path with styling
                         "-shortest"                # Use shortest input length
                     ]
                     
@@ -1284,7 +1293,7 @@ class VideoProcessor:
             
             # Process subtitles if available
             final_video = None
-            if os.path.exists(subtitle_path_to_use):
+            if subtitle_path_to_use:
                 print(f"Processing subtitles from {subtitle_path_to_use}")
                 try:
                     # Parse the SRT file for subtitles
@@ -1366,13 +1375,17 @@ class VideoProcessor:
                             # Create subtitle with better visibility settings
                             try:
                                 # Create a text clip with contrasting colors and outline for better visibility
+                                # Convert background opacity (0-100) to an RGBA color string with alpha
+                                bg_alpha = self.subtitle_bg_opacity / 100.0
+                                bg_color = f'rgba(0,0,0,{bg_alpha})'
+                                
                                 txt_clip = TextClip(
                                     text, 
                                     fontsize=self.subtitle_font_size, 
-                                    color='white',
-                                    bg_color='black',
-                                    # Try multiple common fonts that might be available
-                                    font='Arial',
+                                    color=self.subtitle_color,
+                                    bg_color=bg_color,
+                                    # Use the font specified in settings
+                                    font=self.subtitle_font,
                                     size=(video_width * 0.9, None),  # Use 90% of video width
                                     method='caption',
                                     align='center',
@@ -1384,11 +1397,14 @@ class VideoProcessor:
                                 try:
                                     # First fallback with minimal font specification
                                     print("Trying fallback font rendering...")
+                                    # Still try to use custom settings in fallback
+                                    bg_alpha = self.subtitle_bg_opacity / 100.0
+                                    bg_color = f'rgba(0,0,0,{bg_alpha})'
                                     txt_clip = TextClip(
                                         text, 
                                         fontsize=self.subtitle_font_size, 
-                                        color='white',
-                                        bg_color='black',
+                                        color=self.subtitle_color,
+                                        bg_color=bg_color,
                                         size=(video_width * 0.9, None),
                                         method='caption',
                                         align='center'
@@ -1400,7 +1416,7 @@ class VideoProcessor:
                                     txt_clip = TextClip(
                                         text, 
                                         fontsize=self.subtitle_font_size, 
-                                        color='white',
+                                        color=self.subtitle_color,
                                         size=(video_width * 0.9, None)
                                     )
                             
@@ -1484,12 +1500,16 @@ class VideoProcessor:
                 ]
                 
                 # Add subtitles in fallback method too if available
-                if os.path.exists(subtitle_path_to_use):
+                if subtitle_path_to_use:
                     print(f"Adding subtitles in fallback method: {subtitle_path_to_use}")
                     subtitle_path_norm = os.path.normpath(subtitle_path_to_use)
                     subtitle_path_ffmpeg = subtitle_path_norm.replace('\\', '/')  # FFmpeg prefers forward slashes
                     print(f"Formatted subtitle path for FFmpeg fallback: {subtitle_path_ffmpeg}")
-                    command.extend(["-vf", f"subtitles={subtitle_path_ffmpeg}"])
+                    
+                    # Create subtitle styling options based on user preferences
+                    subtitle_style = f"fontsize={self.subtitle_font_size},fontcolor={self.subtitle_color},alpha={self.subtitle_bg_opacity/100}"
+                    
+                    command.extend(["-vf", f"subtitles={subtitle_path_ffmpeg}:force_style='{subtitle_style}'"])
                     # If we're adding subtitles, we can't copy the video stream
                     command[8] = "libx264"  # Replace "copy" with "libx264"
                 
@@ -1970,7 +1990,8 @@ class VideoProcessor:
                 print(f"Running command for Marathi: {' '.join(cmd)}")
                 
                 # Set a reasonable timeout based on audio length and model size
-                timeout = max(300, int(self.video.duration * 2))  # At least 5 minutes, but longer for Marathi
+                # Marathi needs more time due to its complexity
+                timeout = max(600, int(self.video.duration * 3))  # At least 10 minutes, and longer for longer videos
                 
                 result = subprocess.run(
                     cmd,
@@ -2123,3 +2144,37 @@ class VideoProcessor:
         except Exception as e:
             print(f"Error saving uploaded file: {e}")
             return None 
+
+    def update_subtitle_settings(self, font_size: int = None, font_color: str = None, 
+                              bg_opacity: int = None, font: str = None) -> None:
+        """
+        Update subtitle appearance settings.
+        
+        Args:
+            font_size: Font size for subtitles (10 or above)
+            font_color: Font color for subtitles (e.g., "white", "yellow", etc.)
+            bg_opacity: Background opacity (0-100)
+            font: Font name to use
+        """
+        if font_size is not None:
+            if font_size < 10:
+                print(f"Warning: Font size {font_size} too small, setting to minimum value of 10")
+                font_size = 10
+            self.subtitle_font_size = font_size
+            print(f"Subtitle font size updated to {self.subtitle_font_size}")
+            
+        if font_color is not None:
+            self.subtitle_color = font_color
+            print(f"Subtitle color updated to {self.subtitle_color}")
+            
+        if bg_opacity is not None:
+            if bg_opacity < 0:
+                bg_opacity = 0
+            elif bg_opacity > 100:
+                bg_opacity = 100
+            self.subtitle_bg_opacity = bg_opacity
+            print(f"Subtitle background opacity updated to {self.subtitle_bg_opacity}")
+            
+        if font is not None:
+            self.subtitle_font = font
+            print(f"Subtitle font updated to {self.subtitle_font}")

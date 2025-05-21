@@ -593,6 +593,27 @@ class VoiceChanger:
                         print(f"Loading audio segment from {segment_file}")
                         segment_audio = AudioSegment.from_file(segment_file)
                         
+                        # Calculate the target duration for this segment based on original SRT
+                        target_duration_ms = end_ms - start_ms
+                        
+                        # Get the actual generated audio duration
+                        actual_duration_ms = len(segment_audio)
+                        
+                        # If there's a significant difference, adjust speed
+                        if abs(actual_duration_ms - target_duration_ms) > 50:  # 50ms tolerance
+                            print(f"Adjusting segment duration: target={target_duration_ms}ms, actual={actual_duration_ms}ms")
+                            
+                            if LIBROSA_AVAILABLE:
+                                # Use advanced librosa-based time stretching if available
+                                self._adjust_audio_duration_librosa(segment_file, target_duration_ms)
+                            else:
+                                # Use simple time stretching as fallback
+                                self._adjust_audio_duration_simple(segment_file, target_duration_ms, actual_duration_ms)
+                            
+                            # Reload the adjusted audio segment
+                            segment_audio = AudioSegment.from_file(segment_file)
+                            print(f"Adjusted segment new duration: {len(segment_audio)}ms")
+                        
                         # Calculate silence needed before this segment
                         if i > 0:  # Not the first segment
                             # Add silence to match the subtitle timing
@@ -852,6 +873,131 @@ class VoiceChanger:
             traceback.print_exc()
             return False
 
+    def _adjust_audio_duration_simple(self, audio_file, target_duration_ms, actual_duration_ms=None):
+        """
+        Adjust audio duration using simple methods (time stretching or silence padding).
+        
+        Args:
+            audio_file (str): Path to audio file
+            target_duration_ms (int): Target duration in milliseconds
+            actual_duration_ms (int, optional): Actual duration in milliseconds, will be measured if not provided
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            audio = AudioSegment.from_file(audio_file)
+            
+            # If actual_duration_ms was not provided, measure it
+            if actual_duration_ms is None:
+                actual_duration_ms = len(audio)
+            
+            # If actual is too short, we can add silence
+            if actual_duration_ms < target_duration_ms:
+                # Calculate silence to add (distribute at beginning and end)
+                silence_to_add = target_duration_ms - actual_duration_ms
+                silence_start = int(silence_to_add * 0.2)  # 20% at start
+                silence_end = silence_to_add - silence_start
+                
+                # Add silence
+                new_audio = AudioSegment.silent(duration=silence_start) + audio + AudioSegment.silent(duration=silence_end)
+                
+                # Export to file
+                new_audio.export(audio_file, format="mp3")
+                print(f"Added {silence_to_add}ms of silence ({silence_start}ms at start, {silence_end}ms at end)")
+                return True
+                
+            # If actual is too long, we need to speed up (time stretch)
+            elif actual_duration_ms > target_duration_ms:
+                # Try using PyDub's speed change
+                speed_factor = actual_duration_ms / target_duration_ms
+                
+                # Limit speed factor to avoid artifacts
+                if speed_factor > 1.5:
+                    speed_factor = 1.5
+                    print(f"Limiting speed factor to {speed_factor} to avoid artifacts")
+                
+                try:
+                    # Create a temporary file for ffmpeg output
+                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
+                        temp_path = temp_file.name
+                    
+                    # Use ffmpeg for time stretching
+                    subprocess.run([
+                        "ffmpeg", "-y", "-i", audio_file, 
+                        "-filter:a", f"atempo={speed_factor}", 
+                        "-vn", temp_path
+                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    # Copy back to original file
+                    shutil.copy2(temp_path, audio_file)
+                    
+                    # Clean up
+                    os.unlink(temp_path)
+                    
+                    print(f"Adjusted speed by factor {speed_factor}")
+                    return True
+                    
+                except Exception as e:
+                    print(f"Error in ffmpeg time stretching: {e}")
+                    # Just return original file if speed adjustment fails
+                    return True
+            
+            return True
+                
+        except Exception as e:
+            print(f"Error in simple audio adjustment: {e}")
+            return False
+    
+    def _adjust_audio_duration_librosa(self, audio_file, target_duration_ms):
+        """
+        Adjust audio duration using librosa's more advanced time stretching.
+        
+        Args:
+            audio_file (str): Path to audio file
+            target_duration_ms (int): Target duration in milliseconds
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Load the audio file
+            y, sr = librosa.load(audio_file, sr=None)
+            
+            # Calculate current duration
+            current_duration_sec = librosa.get_duration(y=y, sr=sr)
+            target_duration_sec = target_duration_ms / 1000.0
+            
+            # Calculate stretch factor
+            stretch_factor = target_duration_sec / current_duration_sec
+            
+            # Apply time stretching
+            y_stretched = librosa.effects.time_stretch(y, rate=1/stretch_factor)
+            
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # Save the stretched audio using soundfile
+            sf.write(temp_path, y_stretched, sr)
+            
+            # Convert back to mp3
+            subprocess.run([
+                "ffmpeg", "-y", "-i", temp_path, "-c:a", "libmp3lame", "-q:a", "2", audio_file
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Clean up
+            os.unlink(temp_path)
+            
+            print(f"Applied advanced time stretching with factor {stretch_factor}")
+            return True
+            
+        except Exception as e:
+            print(f"Error in librosa time stretching: {e}")
+            # Fall back to simple method
+            actual_duration_ms = int(current_duration_sec * 1000) if 'current_duration_sec' in locals() else None
+            return self._adjust_audio_duration_simple(audio_file, target_duration_ms, actual_duration_ms)
+
 if __name__ == "__main__":
     # Example usage
     changer = VoiceChanger()
@@ -1081,7 +1227,7 @@ class EnhancedSyncVoiceChanger(VoiceChanger):
                 
                 # If the durations are close enough, no need to adjust
                 duration_diff = abs(actual_duration_ms - target_duration_ms)
-                if duration_diff < 300:  # Within 300ms is acceptable
+                if duration_diff < 50:  # Using a tighter tolerance (50ms) for better synchronization
                     return True
                 
                 print(f"Duration adjustment needed: target={target_duration_ms}ms, actual={actual_duration_ms}ms, diff={duration_diff}ms")
@@ -1101,126 +1247,6 @@ class EnhancedSyncVoiceChanger(VoiceChanger):
         except Exception as e:
             print(f"Error generating segment with duration control: {e}")
             return False
-    
-    def _adjust_audio_duration_simple(self, audio_file, target_duration_ms, actual_duration_ms):
-        """
-        Adjust audio duration using simple methods (time stretching or silence padding).
-        
-        Args:
-            audio_file (str): Path to audio file
-            target_duration_ms (int): Target duration in milliseconds
-            actual_duration_ms (int): Actual duration in milliseconds
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            audio = AudioSegment.from_file(audio_file)
-            
-            # If actual is too short, we can add silence
-            if actual_duration_ms < target_duration_ms:
-                # Calculate silence to add (distribute at beginning and end)
-                silence_to_add = target_duration_ms - actual_duration_ms
-                silence_start = int(silence_to_add * 0.2)  # 20% at start
-                silence_end = silence_to_add - silence_start
-                
-                # Add silence
-                new_audio = AudioSegment.silent(duration=silence_start) + audio + AudioSegment.silent(duration=silence_end)
-                
-                # Export to file
-                new_audio.export(audio_file, format="mp3")
-                print(f"Added {silence_to_add}ms of silence ({silence_start}ms at start, {silence_end}ms at end)")
-                return True
-                
-            # If actual is too long, we need to speed up (time stretch)
-            elif actual_duration_ms > target_duration_ms:
-                # Try using PyDub's speed change
-                speed_factor = actual_duration_ms / target_duration_ms
-                
-                # Limit speed factor to avoid artifacts
-                if speed_factor > 1.5:
-                    speed_factor = 1.5
-                    print(f"Limiting speed factor to {speed_factor} to avoid artifacts")
-                
-                try:
-                    # Create a temporary file for ffmpeg output
-                    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
-                        temp_path = temp_file.name
-                    
-                    # Use ffmpeg for time stretching
-                    subprocess.run([
-                        "ffmpeg", "-y", "-i", audio_file, 
-                        "-filter:a", f"atempo={speed_factor}", 
-                        "-vn", temp_path
-                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    # Copy back to original file
-                    shutil.copy2(temp_path, audio_file)
-                    
-                    # Clean up
-                    os.unlink(temp_path)
-                    
-                    print(f"Adjusted speed by factor {speed_factor}")
-                    return True
-                    
-                except Exception as e:
-                    print(f"Error in ffmpeg time stretching: {e}")
-                    # Just return original file if speed adjustment fails
-                    return True
-            
-            return True
-                
-        except Exception as e:
-            print(f"Error in simple audio adjustment: {e}")
-            return False
-    
-    def _adjust_audio_duration_librosa(self, audio_file, target_duration_ms):
-        """
-        Adjust audio duration using librosa's more advanced time stretching.
-        
-        Args:
-            audio_file (str): Path to audio file
-            target_duration_ms (int): Target duration in milliseconds
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            # Load the audio file
-            y, sr = librosa.load(audio_file, sr=None)
-            
-            # Calculate current duration
-            current_duration_sec = librosa.get_duration(y=y, sr=sr)
-            target_duration_sec = target_duration_ms / 1000.0
-            
-            # Calculate stretch factor
-            stretch_factor = target_duration_sec / current_duration_sec
-            
-            # Apply time stretching
-            y_stretched = librosa.effects.time_stretch(y, rate=1/stretch_factor)
-            
-            # Create a temporary file
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_path = temp_file.name
-            
-            # Save the stretched audio using soundfile instead of deprecated librosa.output.write_wav
-            sf.write(temp_path, y_stretched, sr)
-            
-            # Convert back to mp3
-            subprocess.run([
-                "ffmpeg", "-y", "-i", temp_path, "-c:a", "libmp3lame", "-q:a", "2", audio_file
-            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            # Clean up
-            os.unlink(temp_path)
-            
-            print(f"Applied advanced time stretching with factor {stretch_factor}")
-            return True
-            
-        except Exception as e:
-            print(f"Error in librosa time stretching: {e}")
-            # Fall back to simple method
-            return self._adjust_audio_duration_simple(audio_file, target_duration_ms, int(current_duration_sec * 1000))
     
     def _assemble_final_audio(self, segment_files, output_filename):
         """
