@@ -202,4 +202,64 @@ export const downloadFile = async (jobId, fileType) => {
   return response.data;
 };
 
+// Voice Changer API functions
+export const getVoices = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/voices`);
+    if (!response.ok) {
+      throw new Error('Failed to fetch voices');
+    }
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching voices:', error);
+    throw error;
+  }
+};
+
+export const generateTTS = async (jobId, subtitleId, voiceId) => {
+  try {
+    const formData = new FormData();
+    formData.append('subtitle_id', subtitleId);
+    formData.append('voice_id', voiceId);
+
+    const response = await fetch(`${API_BASE_URL}/tts/${jobId}`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to generate TTS');
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error generating TTS:', error);
+    throw error;
+  }
+};
+
+export const generateSTS = async (jobId, audioId, voiceId) => {
+  try {
+    const formData = new FormData();
+    formData.append('audio_id', audioId);
+    formData.append('voice_id', voiceId);
+
+    const response = await fetch(`${API_BASE_URL}/sts/${jobId}`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Failed to generate STS');
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.error('Error generating STS:', error);
+    throw error;
+  }
+};
+
 export default api; 

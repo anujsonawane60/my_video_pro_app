@@ -1,0 +1,322 @@
+import pysrt
+import requests
+import os
+from pydub import AudioSegment
+from pydub.silence import detect_silence # Not directly used for silence generation, but useful for analysis
+from datetime import timedelta
+import time
+import logging
+import io # Needed for BytesIO
+
+# Configure logging for better feedback
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Configuration ---
+# IMPORTANT: Replace 'YOUR_ELEVEN_LABS_API_KEY' with your actual Eleven Labs API key.
+# It's highly recommended to use environment variables for API keys in production.
+# Example: ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY")
+ELEVEN_LABS_API_KEY = "sk_d1eaecf9c7f260985a231f32334289a0f8ddf9ac523ec4df" # <<<--- REPLACE THIS!
+ELEVEN_LABS_BASE_URL = "https://api.elevenlabs.io/v1/text-to-speech"
+
+# Default voice ID (e.g., 'Rachel', 'Adam', 'Antoni', etc.).
+# You can find available voices in your Eleven Labs dashboard or via their API.
+DEFAULT_VOICE_ID = "ErXwobaYiN019PkySvjV" # Example: 'Antoni'
+
+# Output audio format
+OUTPUT_AUDIO_FORMAT = "mp3" # Can be "mp3", "wav", "flac", etc.
+
+# --- Helper Functions ---
+
+def get_eleven_labs_voices():
+    """Fetches and prints available Eleven Labs voices."""
+    headers = {
+        "Accept": "application/json",
+        "xi-api-key": ELEVEN_LABS_API_KEY
+    }
+    try:
+        response = requests.get("https://api.elevenlabs.io/v1/voices", headers=headers)
+        response.raise_for_status() # Raise an exception for HTTP errors
+        voices_data = response.json()
+        logging.info("Available Eleven Labs Voices:")
+        for voice in voices_data.get("voices", []):
+            logging.info(f"  Name: {voice['name']}, ID: {voice['voice_id']}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error fetching Eleven Labs voices: {e}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {e}")
+
+
+def generate_speech_eleven_labs(text: str, voice_id: str = DEFAULT_VOICE_ID) -> bytes:
+    """
+    Generates speech from text using the Eleven Labs API.
+
+    Args:
+        text (str): The text to convert to speech.
+        voice_id (str): The ID of the voice to use.
+
+    Returns:
+        bytes: The raw audio data in MP3 format.
+
+    Raises:
+        requests.exceptions.RequestException: If the API call fails.
+        ValueError: If the API key is missing.
+    """
+    if not ELEVEN_LABS_API_KEY or ELEVEN_LABS_API_KEY == "YOUR_ELEVEN_LABS_API_KEY":
+        raise ValueError("Eleven Labs API key is not set. Please update ELEVEN_LABS_API_KEY.")
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVEN_LABS_API_KEY
+    }
+    data = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2", # Or "eleven_monolingual_v1" for English only
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        }
+    }
+    url = f"{ELEVEN_LABS_BASE_URL}/{voice_id}"
+
+    logging.info(f"Generating speech for: '{text[:50]}...'")
+    try:
+        response = requests.post(url, json=data, headers=headers)
+        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+        logging.info(f"Speech generated successfully for text: '{text[:50]}...'")
+        return response.content
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Eleven Labs API error for text '{text[:50]}...': {e}")
+        if response.status_code == 401:
+            logging.error("Unauthorized: Check your Eleven Labs API key.")
+        elif response.status_code == 429:
+            logging.error("Rate limit exceeded: You've made too many requests. Try again later.")
+        elif response.status_code == 400:
+            logging.error(f"Bad request: {response.json().get('detail', 'No details provided')}")
+        raise # Re-raise the exception after logging
+
+def srt_time_to_milliseconds(srt_time: pysrt.SubRipTime) -> int:
+    """Converts pysrt.SubRipTime object to milliseconds."""
+    return (srt_time.hours * 3600 + srt_time.minutes * 60 + srt_time.seconds) * 1000 + srt_time.milliseconds
+
+def load_progress(progress_file_path: str) -> int:
+    """
+    Loads the last successfully processed subtitle index from the progress file.
+    Returns 0 if the file doesn't exist or is invalid.
+    """
+    if os.path.exists(progress_file_path):
+        try:
+            with open(progress_file_path, 'r') as f:
+                index = int(f.read().strip())
+                logging.info(f"Resuming from subtitle index: {index + 1}") # +1 for human-readable index
+                return index
+        except (ValueError, IOError) as e:
+            logging.warning(f"Could not read progress file '{progress_file_path}': {e}. Starting from beginning.")
+    return 0
+
+def save_progress(progress_file_path: str, index: int):
+    """Saves the current subtitle index to the progress file."""
+    try:
+        with open(progress_file_path, 'w') as f:
+            f.write(str(index))
+    except IOError as e:
+        logging.error(f"Failed to save progress to '{progress_file_path}': {e}")
+
+def synchronize_and_generate_audio(srt_file_path: str, output_audio_path: str, voice_id: str = DEFAULT_VOICE_ID):
+    """
+    Parses an SRT file, generates synchronized speech using Eleven Labs,
+    and saves the combined audio, with resume capability.
+
+    Args:
+        srt_file_path (str): Path to the input SRT file.
+        output_audio_path (str): Path to save the output audio file.
+        voice_id (str): The Eleven Labs voice ID to use.
+    """
+    if not os.path.exists(srt_file_path):
+        logging.error(f"Error: SRT file not found at '{srt_file_path}'")
+        return
+
+    try:
+        subs = pysrt.open(srt_file_path, encoding='utf-8')
+        logging.info(f"Successfully opened SRT file: {srt_file_path} with {len(subs)} subtitles.")
+    except Exception as e:
+        logging.error(f"Failed to open or parse SRT file '{srt_file_path}': {e}")
+        return
+
+    progress_file_path = f"{output_audio_path}.progress"
+    start_from_index = load_progress(progress_file_path) # Get the index of the last *completed* subtitle
+
+    combined_audio = AudioSegment.empty()
+    last_end_time_ms = 0
+
+    # If resuming, load the existing partial audio file
+    if start_from_index > 0 and os.path.exists(output_audio_path):
+        try:
+            combined_audio = AudioSegment.from_file(output_audio_path, format=OUTPUT_AUDIO_FORMAT)
+            logging.info(f"Loaded existing audio file '{output_audio_path}' for resumption.")
+            # Set last_end_time_ms to the end time of the subtitle *before* the current starting point
+            if start_from_index < len(subs): # Ensure index is valid
+                last_end_time_ms = srt_time_to_milliseconds(subs[start_from_index].start)
+                logging.info(f"Adjusting last_end_time_ms to {last_end_time_ms} based on next subtitle start.")
+            else:
+                # If start_from_index is at or beyond the last subtitle, it implies completion
+                # This case should ideally be handled by deleting progress file at end
+                logging.warning("Resume index is at or beyond total subtitles. Assuming completion.")
+                if os.path.exists(progress_file_path):
+                    os.remove(progress_file_path)
+                return
+
+        except Exception as e:
+            logging.error(f"Could not load existing audio file '{output_audio_path}': {e}. Starting from beginning.")
+            # If loading fails, reset progress and start fresh
+            start_from_index = 0
+            combined_audio = AudioSegment.empty()
+            last_end_time_ms = 0
+            if os.path.exists(progress_file_path):
+                os.remove(progress_file_path)
+
+    # If starting from beginning, or if loading failed, ensure last_end_time_ms is 0
+    if start_from_index == 0:
+        last_end_time_ms = 0
+
+    for i, sub in enumerate(subs):
+        if i < start_from_index:
+            # Skip already processed subtitles
+            # If we are resuming, last_end_time_ms needs to be updated to the end of the *last skipped* subtitle
+            if i == start_from_index - 1:
+                 last_end_time_ms = srt_time_to_milliseconds(sub.end)
+            continue
+
+        current_start_ms = srt_time_to_milliseconds(sub.start)
+        current_end_ms = srt_time_to_milliseconds(sub.end)
+        text_to_speak = sub.text_without_tags # Use this to remove HTML tags if present
+
+        # Calculate required silence duration before the current segment
+        silence_duration_ms = current_start_ms - last_end_time_ms
+        if silence_duration_ms > 0:
+            logging.info(f"Segment {i+1}: Adding {silence_duration_ms} ms of silence.")
+            combined_audio += AudioSegment.silent(duration=silence_duration_ms)
+        elif silence_duration_ms < 0:
+            logging.warning(f"Segment {i+1}: Overlap detected. SRT time: {sub.start} - {sub.end}. Overlap by {-silence_duration_ms} ms.")
+
+        try:
+            # Generate speech for the current subtitle text
+            audio_bytes = generate_speech_eleven_labs(text_to_speak, voice_id)
+            segment_audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3") # Eleven Labs typically returns MP3
+
+            # Check if the generated audio duration is significantly different from SRT duration
+            # This is crucial for high synchronization
+            srt_segment_duration_ms = current_end_ms - current_start_ms
+            generated_audio_duration_ms = len(segment_audio)
+
+            if abs(generated_audio_duration_ms - srt_segment_duration_ms) > 100: # Allow for 100ms tolerance
+                logging.warning(f"Segment {i+1}: Duration mismatch detected:")
+                logging.warning(f"  SRT duration: {srt_segment_duration_ms} ms")
+                logging.warning(f"  Generated audio duration: {generated_audio_duration_ms} ms")
+                logging.warning(f"  Text: '{text_to_speak[:50]}...'")
+
+                # Strategy for duration mismatch:
+                # If generated audio is longer, we can trim it.
+                # If generated audio is shorter, we can pad it with silence.
+                if generated_audio_duration_ms > srt_segment_duration_ms:
+                    logging.warning(f"  Trimming generated audio to {srt_segment_duration_ms} ms.")
+                    segment_audio = segment_audio[:srt_segment_duration_ms]
+                else: # generated_audio_duration_ms < srt_segment_duration_ms
+                    padding_needed = srt_segment_duration_ms - generated_audio_duration_ms
+                    logging.warning(f"  Padding generated audio with {padding_needed} ms of silence.")
+                    segment_audio += AudioSegment.silent(duration=padding_needed)
+
+            combined_audio += segment_audio
+            last_end_time_ms = current_end_ms # Update last_end_time_ms based on SRT end time
+
+            # Save progress after successfully processing each subtitle
+            save_progress(progress_file_path, i)
+
+        except ValueError as e:
+            logging.error(f"Configuration Error: {e}")
+            return # Exit if API key is not set
+        except requests.exceptions.RequestException:
+            logging.error(f"Skipping segment {i+1} due to API error: '{text_to_speak[:50]}...'")
+            # If API fails, we still need to advance time to maintain sync for subsequent segments
+            # We add silence for the expected duration of this segment.
+            combined_audio += AudioSegment.silent(duration=srt_segment_duration_ms)
+            last_end_time_ms = current_end_ms
+            # Do NOT save progress here, so this segment will be retried.
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while processing segment {i+1}: {e}")
+            logging.error(f"Skipping segment {i+1} due to unexpected error: '{text_to_speak[:50]}...'")
+            # If any other error, still advance time with silence
+            combined_audio += AudioSegment.silent(duration=srt_segment_duration_ms)
+            last_end_time_ms = current_end_ms
+            # Do NOT save progress here, so this segment will be retried.
+
+        # Add a small delay between API calls to avoid hitting rate limits too quickly
+        time.sleep(0.1) # 100ms delay
+
+    try:
+        combined_audio.export(output_audio_path, format=OUTPUT_AUDIO_FORMAT)
+        logging.info(f"Successfully generated synchronized audio to: {output_audio_path}")
+        # Clean up progress file on successful completion
+        if os.path.exists(progress_file_path):
+            os.remove(progress_file_path)
+            logging.info(f"Removed progress file: {progress_file_path}")
+    except Exception as e:
+        logging.error(f"Failed to export final audio to '{output_audio_path}': {e}")
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    # Example usage:
+    # 1. Create a dummy SRT file for testing, or use an existing one.
+    #    For example, save the following content as 'example.srt':
+    """
+    1
+    00:00:00,500 --> 00:00:02,500
+    Hello, this is the first sentence.
+
+    2
+    00:00:03,000 --> 00:00:05,000
+    And here is the second one.
+
+    3
+    00:00:05,500 --> 00:00:08,000
+    This is a longer sentence to test synchronization.
+
+    4
+    00:00:09,000 --> 00:00:10,000
+    Finally, the last part.
+    """
+    # 2. Make sure you have your Eleven Labs API key set in ELEVEN_LABS_API_KEY.
+    # 3. Run the script.
+
+    # Optional: Get available voices to choose from
+    # get_eleven_labs_voices()
+
+    srt_input_file = "ideogram_edited_subtitles.srt" # Make sure this file exists in the same directory
+    output_audio_file = "synchronized_speech.mp3"
+
+    # Create a dummy SRT file if it doesn't exist for easy testing
+    if not os.path.exists(srt_input_file):
+        logging.info(f"Creating a dummy SRT file: {srt_input_file}")
+        dummy_srt_content = """
+1
+00:00:00,500 --> 00:00:02,500
+Hello, this is the first sentence.
+
+2
+00:00:03,000 --> 00:00:05,000
+And here is the second one.
+
+3
+00:00:05,500 --> 00:00:08,000
+This is a longer sentence to test synchronization.
+
+4
+00:00:09,000 --> 00:00:10,000
+Finally, the last part.
+"""
+        with open(srt_input_file, "w", encoding="utf-8") as f:
+            f.write(dummy_srt_content.strip())
+
+    logging.info(f"Starting audio generation for '{srt_input_file}'...")
+    synchronize_and_generate_audio(srt_input_file, output_audio_file, DEFAULT_VOICE_ID)
+    logging.info("Process completed.")

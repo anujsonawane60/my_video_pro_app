@@ -17,6 +17,7 @@ import ProjectOverviewPage from './pages/ProjectOverviewPage';
 import NewProjectPage from './pages/NewProjectPage';
 import CleanAudioPage from './pages/CleanAudioPage';
 import MakeSubtitlePage from './pages/MakeSubtitlePage';
+import VoiceChangerPage from './pages/VoiceChangerPage';
 
 // Create a theme
 const theme = createTheme({
@@ -65,6 +66,7 @@ function App() {
               <Route path="/project/:projectId" element={<ProjectOverviewPage />} />
               <Route path="/project/:projectId/clean-audio" element={<CleanAudioPage />} />
               <Route path="/project/:projectId/make-subtitle" element={<MakeSubtitlePageWrapper />} />
+              <Route path="/project/:projectId/voice-changer" element={<VoiceChangerPage />} />
               {/* Module routes will be added here */}
             </Routes>
           </Container>

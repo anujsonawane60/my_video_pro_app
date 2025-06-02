@@ -28,6 +28,8 @@ from sqlalchemy.orm import sessionmaker
 from database import engine, get_db
 from models import Job, JobStep, Subtitle, AudioFile
 from config import UPLOAD_DIR, OUTPUT_DIR
+from tts_generator import TTSGenerator
+from sts_generator import STSGenerator
 
 # Load environment variables from .env file
 load_dotenv()
@@ -91,7 +93,9 @@ app.add_middleware(
 # Mount the outputs directory for static file serving
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
-# --- Removed redundant directory creation ---
+# Initialize TTS and STS generators
+tts_generator = TTSGenerator()
+sts_generator = STSGenerator()
 
 @app.get("/")
 async def read_root():
@@ -877,6 +881,113 @@ async def get_job_cleaned_audio_files(job_id: str, db: Session = Depends(get_db)
             
     return {"job_id": str(job.id), "cleaned_audio_files": result}
 
+@app.get("/voices")
+async def get_voices():
+    """Get available voices from ElevenLabs"""
+    try:
+        voices = tts_generator.get_available_voices()
+        return {"voices": voices}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tts/{job_id}")
+async def generate_tts(
+    job_id: str,
+    subtitle_id: str = Form(...),
+    voice_id: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Generate speech from subtitle text"""
+    try:
+        # Get subtitle content
+        subtitle = db.query(Subtitle).filter(Subtitle.id == subtitle_id, Subtitle.job_id == job_id).first()
+        if not subtitle or not subtitle.file_path or not os.path.exists(subtitle.file_path):
+            raise HTTPException(status_code=404, detail="Subtitle file not found")
+
+        # Read subtitle content
+        with open(subtitle.file_path, 'r', encoding='utf-8') as f:
+            srt_content = f.read()
+
+        # Extract text from SRT
+        text = tts_generator.extract_text_from_srt(srt_content)
+
+        # Generate output path
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        output_filename = f"tts_{job_id}_{timestamp}.mp3"
+        output_path = os.path.join(OUTPUT_DIR, str(job_id), output_filename)
+
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # Generate speech
+        result = tts_generator.generate_speech(text, voice_id, output_path)
+
+        # Add to AudioFile table
+        audio_file = AudioFile(
+            job_id=job_id,
+            type="tts_generated",
+            file_path=output_path,
+            label=f"TTS Generated ({os.path.basename(subtitle.file_path)})",
+            voice_id=voice_id,
+            created_at=datetime.utcnow()
+        )
+        db.add(audio_file)
+        db.commit()
+
+        return {
+            "status": "success",
+            "audioUrl": f"/outputs/{job_id}/{output_filename}",
+            "audioFileId": str(audio_file.id)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/sts/{job_id}")
+async def generate_sts(
+    job_id: str,
+    audio_id: str = Form(...),
+    voice_id: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Convert voice in audio file to target voice"""
+    try:
+        # Get audio file
+        audio = db.query(AudioFile).filter(AudioFile.id == audio_id, AudioFile.job_id == job_id).first()
+        if not audio or not audio.file_path or not os.path.exists(audio.file_path):
+            raise HTTPException(status_code=404, detail="Audio file not found")
+
+        # Generate output path
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        output_filename = f"sts_{job_id}_{timestamp}.mp3"
+        output_path = os.path.join(OUTPUT_DIR, str(job_id), output_filename)
+
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # Convert voice
+        result = sts_generator.convert_voice(audio.file_path, voice_id, output_path)
+
+        # Add to AudioFile table
+        audio_file = AudioFile(
+            job_id=job_id,
+            type="sts_generated",
+            file_path=output_path,
+            label=f"STS Generated ({os.path.basename(audio.file_path)})",
+            voice_id=voice_id,
+            created_at=datetime.utcnow()
+        )
+        db.add(audio_file)
+        db.commit()
+
+        return {
+            "status": "success",
+            "audioUrl": f"/outputs/{job_id}/{output_filename}",
+            "audioFileId": str(audio_file.id)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
