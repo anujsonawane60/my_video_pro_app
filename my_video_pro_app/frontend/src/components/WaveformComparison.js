@@ -535,21 +535,33 @@ const WaveformComparison = ({ originalAudioPath, cleanedAudioPath }) => {
       <Typography variant="h6" gutterBottom sx={{ fontWeight: 'bold' }}>
         Audio Comparison
       </Typography>
-      
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2, justifyContent: 'flex-end' }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2, justifyContent: 'space-between' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', mr: 2 }}>
+            <Box sx={{ width: 16, height: 16, bgcolor: '#ff7f0e', borderRadius: '50%', mr: 1 }} />
+            <Typography variant="caption">Original</Typography>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center' }}>
+            <Box sx={{ width: 16, height: 16, bgcolor: '#2ca02c', borderRadius: '50%', mr: 1 }} />
+            <Typography variant="caption">Cleaned</Typography>
+          </Box>
+        </Box>
         <Button
           size="small"
           startIcon={<SyncIcon />}
           color={syncedPlayback ? "secondary" : "primary"}
           onClick={toggleSyncedPlayback}
           variant={syncedPlayback ? "contained" : "outlined"}
+          title={syncedPlayback ? "Disable synced playback" : "Enable synced playback"}
+          aria-label="Toggle synced playback"
         >
           {syncedPlayback ? "SYNCED PLAYBACK" : "INDEPENDENT PLAYBACK"}
         </Button>
       </Box>
-      
       <Divider sx={{ mb: 2 }} />
-      
+      <Typography variant="subtitle1" sx={{ color: '#ff7f0e', fontWeight: 'bold', mb: 1 }}>
+        Original Audio
+      </Typography>
       {renderWaveform(
         originalWaveformRef,
         originalDb,
@@ -561,7 +573,9 @@ const WaveformComparison = ({ originalAudioPath, cleanedAudioPath }) => {
         "Original Audio",
         '#ff7f0e'
       )}
-      
+      <Typography variant="subtitle1" sx={{ color: '#2ca02c', fontWeight: 'bold', mb: 1 }}>
+        Cleaned Audio
+      </Typography>
       {renderWaveform(
         cleanedWaveformRef,
         cleanedDb,
@@ -573,30 +587,24 @@ const WaveformComparison = ({ originalAudioPath, cleanedAudioPath }) => {
         "Cleaned Audio",
         '#2ca02c'
       )}
-      
       <Divider sx={{ mb: 2 }} />
-      
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
         <Slider
           value={sliderPosition}
           onChange={handleSeek}
           aria-labelledby="audio-position-slider"
-          sx={{ mx: 2, flexGrow: 1 }}
+          sx={{ mx: 2, flexGrow: 1, height: 8, color: '#1976d2' }}
           disabled={!duration || isLoading}
         />
-        
         <Typography variant="body2" color="text.secondary" sx={{ minWidth: 80, textAlign: 'right' }}>
           {formatTime(currentTime)} / {formatTime(duration)}
         </Typography>
       </Box>
-      
       <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-        Use the individual play controls to compare each audio track. 
-        Toggle synchronized playback to compare the audio at the same positions.
-        Audio metrics show the noise levels and quality improvements in the cleaned version.
+        Use the individual play controls to compare each audio track. Toggle synchronized playback to compare the audio at the same positions. Audio metrics show the noise levels and quality improvements in the cleaned version.
       </Typography>
     </Paper>
   );
 };
 
-export default WaveformComparison; 
+export default WaveformComparison;

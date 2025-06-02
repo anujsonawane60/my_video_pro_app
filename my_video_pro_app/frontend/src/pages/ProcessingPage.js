@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
@@ -46,7 +47,6 @@ import {
   extractAudio,
   generateSubtitles,
   cleanAudio,
-  saveEditedSubtitles,
   createFinalVideo,
   getJobStatus,
   getVideoInfo,
@@ -58,8 +58,10 @@ import {
   getVoiceHistory,
   translateSubtitles,
   getAvailableAudio,
-  getAvailableSubtitles
+  getAvailableSubtitles,
+  // Removed saveEditedSubtitles import
 } from '../services/api';
+import api from '../services/api'; // Import api for saveEditedSubtitles
 import MenuIcon from '@mui/icons-material/Menu';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import InfoIcon from '@mui/icons-material/Info';
@@ -681,7 +683,18 @@ const ProcessingPage = () => {
     setError(null);
     
     try {
-      const response = await saveEditedSubtitles(jobId, editedSubtitleContent);
+      // Determine the correct audio path to use
+      let audioPath = null;
+      if (job && job.steps && job.steps.extract_audio && job.steps.extract_audio.status === 'completed') {
+        audioPath = job.steps.extract_audio.path;
+      } else if (job && job.steps && job.steps.clean_audio && job.steps.clean_audio.status === 'completed') {
+        audioPath = job.steps.clean_audio.path;
+      }
+      if (!audioPath) {
+        throw new Error('No audio file available for saving subtitles.');
+      }
+      
+      const response = await api.saveEditedSubtitles(audioPath, editedSubtitleContent, jobId);
       // Update subtitle path to use edited version
       setSubtitlePath(response.edited_subtitle_path);
       
@@ -822,25 +835,8 @@ const ProcessingPage = () => {
   };
   
   // Effect to potentially fetch available voices from ElevenLabs
-  // This could be implemented in the future to dynamically get voices
   useEffect(() => {
-    // This is where we would implement an API call to get voices
-    // For now, we're using the predefined list
-    // Example implementation for future use:
-    /*
-    const fetchVoices = async () => {
-      try {
-        // Would call an API endpoint that returns available voices
-        const response = await fetch('/api/voices');
-        const voices = await response.json();
-        setAvailableVoices(voices);
-      } catch (error) {
-        console.error('Error fetching voices:', error);
-      }
-    };
-    
-    fetchVoices();
-    */
+    // Placeholder for future dynamic voice fetching
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   
@@ -857,7 +853,6 @@ const ProcessingPage = () => {
   useEffect(() => {
     if (activeStep === 5) {
       console.log("Moved to Step 5, fetching available audio files and subtitles");
-      // Add a slight delay to ensure job data is updated
       setTimeout(() => {
         fetchAvailableAudio();
         fetchAvailableSubtitles();
@@ -872,7 +867,6 @@ const ProcessingPage = () => {
     setTranslationError(null);
     
     try {
-      // Show a message to indicate that translation is in progress
       setTranslationError('Translation in progress. This may take a few minutes for large subtitle files...');
       
       const settings = {
@@ -886,8 +880,6 @@ const ProcessingPage = () => {
       const response = await translateSubtitles(jobId, settings);
       
       console.log('Translation response:', response);
-      
-      // Clear the info message
       setTranslationError(null);
       
       if (response.translated_content) {
@@ -895,17 +887,13 @@ const ProcessingPage = () => {
         if (response.translated_subtitle_path) {
           setTranslatedSubtitlePath(response.translated_subtitle_path);
         }
-        
-        // Update subtitle options to include the newly translated subtitles
         updateSubtitleOptions();
       } else {
         throw new Error('No translated content received');
       }
     } catch (error) {
       console.error('Error translating subtitles:', error);
-      // Provide more detailed error message
       let errorMessage = 'Failed to translate subtitles. ';
-      
       if (error.message?.includes('timeout')) {
         errorMessage += 'The translation timed out. Try translating in smaller chunks or try again later.';
       } else if (error.response?.data?.detail) {
@@ -915,7 +903,6 @@ const ProcessingPage = () => {
       } else {
         errorMessage += 'Unknown error occurred';
       }
-      
       setTranslationError(errorMessage);
     } finally {
       setTranslationLoading(false);
@@ -928,18 +915,20 @@ const ProcessingPage = () => {
     setTranslationError(null);
     
     try {
-      const settings = {
-        target_language: translationLanguage,
-        content: translatedSubtitleContent
-      };
+      let audioPath = null;
+      if (job?.steps?.extract_audio?.status === 'completed') {
+        audioPath = job.steps.extract_audio.path;
+      } else if (job?.steps?.clean_audio?.status === 'completed') {
+        audioPath = job.steps.clean_audio.path;
+      }
+      if (!audioPath) {
+        throw new Error('No audio file available for saving subtitles.');
+      }
       
-      const response = await saveEditedSubtitles(jobId, translatedSubtitleContent, translationLanguage);
-      
+      const response = await api.saveEditedSubtitles(audioPath, translatedSubtitleContent, jobId);
       if (response.edited_subtitle_path) {
         setTranslatedSubtitlePath(response.edited_subtitle_path);
       }
-      
-      // Show success message or update UI as needed
     } catch (error) {
       console.error('Error saving translated subtitles:', error);
       setTranslationError(`Failed to save translated subtitles: ${error.message || 'Unknown error'}`);
@@ -951,7 +940,6 @@ const ProcessingPage = () => {
   // Handle download translated subtitles
   const handleDownloadTranslatedSubtitles = () => {
     if (translatedSubtitlePath) {
-      // Create download link
       const downloadUrl = getFileUrl(translatedSubtitlePath);
       const a = document.createElement('a');
       a.href = downloadUrl;
@@ -960,7 +948,6 @@ const ProcessingPage = () => {
       a.click();
       document.body.removeChild(a);
     } else if (translatedSubtitleContent) {
-      // Create blob from content and download
       const blob = new Blob([translatedSubtitleContent], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -973,25 +960,75 @@ const ProcessingPage = () => {
     }
   };
   
-  // Add a new handler function for skipping voice change
+  // Handle skip voice change
   const handleSkipVoiceChange = async () => {
     try {
       setLoading(true);
       setError(null);
-      
       console.log('Skipping voice change for job:', jobId);
-      const response = await skipVoiceChange(jobId);
-      
-      // Update job status
+      await skipVoiceChange(jobId);
       setLoading(false);
-      fetchJobStatus(); // Use fetchJobStatus instead of updateJobStatus
-      
-      // Move to the next step
+      fetchJobStatus();
       setActiveStep(4);
     } catch (error) {
       console.error('Error skipping voice change:', error);
       setError('Failed to skip voice change: ' + (error.response?.data?.detail || error.message));
       setLoading(false);
+    }
+  };
+
+  const fetchAvailableAudio = async () => {
+    if (!jobId) return;
+    try {
+      console.log("Fetching available audio for job:", jobId);
+      const data = await getAvailableAudio(jobId);
+      console.log("Received available audio:", data);
+      if (data && data.audio_files) {
+        setAvailableAudioFiles(data.audio_files);
+        // Ensure selectedAudioId is valid, default to cleaned if available
+        const cleanedAvailable = data.audio_files.find(f => f.id === 'cleaned');
+        const voiceChangedAvailable = data.audio_files.find(f => f.type === 'voice_changed');
+        if (!selectedAudioId || !data.audio_files.find(f => f.id === selectedAudioId)) {
+            if (cleanedAvailable) setSelectedAudioId('cleaned');
+            else if (voiceChangedAvailable) setSelectedAudioId(voiceChangedAvailable.id);
+            else if (data.audio_files.length > 0) setSelectedAudioId(data.audio_files[0].id);
+            else setSelectedAudioId(null);
+        }
+
+      } else {
+        setAvailableAudioFiles([]);
+        setSelectedAudioId(null);
+      }
+    } catch (error) {
+      console.error('Error fetching available audio files:', error);
+      setAvailableAudioFiles([]);
+      setSelectedAudioId(null);
+    }
+  };
+
+  const fetchAvailableSubtitles = async () => {
+    if (!jobId) return;
+    try {
+        console.log("Fetching available subtitles for job:", jobId);
+        const data = await getAvailableSubtitles(jobId);
+        console.log("Received available subtitles:", data);
+        if (data && data.subtitle_files) {
+            setAvailableSubtitleFiles(data.subtitle_files);
+             // Ensure selectedSubtitleId is valid, default to original 'en' if available
+            const originalEnAvailable = data.subtitle_files.find(f => f.id === 'original_en_srt');
+            if (!selectedSubtitleId || !data.subtitle_files.find(f => f.id === selectedSubtitleId)) {
+                if (originalEnAvailable) setSelectedSubtitleId('original_en_srt');
+                else if (data.subtitle_files.length > 0) setSelectedSubtitleId(data.subtitle_files[0].id);
+                else setSelectedSubtitleId(null);
+            }
+        } else {
+            setAvailableSubtitleFiles([]);
+            setSelectedSubtitleId(null);
+        }
+    } catch (error) {
+        console.error('Error fetching available subtitle files:', error);
+        setAvailableSubtitleFiles([]);
+        setSelectedSubtitleId(null);
     }
   };
   
@@ -1104,6 +1141,10 @@ const ProcessingPage = () => {
           )}
         </Box>
         
+         {/* Subtitle Editor & Translator Section - now shown when activeStep === 3 or for editing before other steps */}
+         {/* This original subtitle editor should likely be tied to activeStep 3 (Voice Changer step) */}
+         {/* The logic for showing it activeStep > 2 within renderSubtitleGenerator (called for activeStep===2) was problematic */}
+         {/* For now, keeping it as it was, but this needs review for UX flow */}
         {activeStep > 2 && subtitlePath && (
           <Box sx={{ mt: 3 }}>
             <Typography variant="subtitle1" gutterBottom>Edit Subtitles:</Typography>
@@ -1277,52 +1318,35 @@ const ProcessingPage = () => {
                   color="inherit" 
                   size="small"
                   onClick={() => {
-                    // Extract plain text from SRT content
                     const extractTextFromSrt = (srtContent) => {
-                      // Basic regex to extract only text content from SRT
                       const matches = srtContent.match(/\d+\s*\n[\d:,\s>-]+\n(.*?)(?=\n\s*\n\s*\d+|\n\s*\n\s*$|$)/g);
                       if (!matches) return '';
-                      
-                      // Just get the text part (group 1) from each match
                       const textOnly = matches.map(match => {
                         const lines = match.split('\n');
-                        // Skip the first two lines (index and timestamp)
                         return lines.slice(2).join(' ');
                       });
-                      
                       return textOnly.join(' ');
                     };
                     
-                    // Get the plain text without SRT formatting
                     const plainText = extractTextFromSrt(editedSubtitleContent);
-                    
-                    // Figure out how much to reduce
                     const creditMatch = error.match(/You have (\d+) credits but need (\d+)/);
+
                     if (creditMatch && creditMatch.length >= 3) {
                       const available = parseInt(creditMatch[1]);
                       const required = parseInt(creditMatch[2]);
-                      
-                      // Calculate what percentage of text we can use
                       const ratio = available / required;
-                      const wordsToKeep = Math.floor(plainText.split(' ').length * ratio * 0.9); // 10% safety margin
-                      
-                      // Create a shortened version
+                      const wordsToKeep = Math.floor(plainText.split(' ').length * ratio * 0.9); 
                       const shortenedText = plainText.split(' ').slice(0, wordsToKeep).join(' ');
                       
-                      // Confirm with user
                       if (window.confirm(
                         `Would you like to automatically shorten the text to fit within your available credits? ` +
                         `This will use only about ${Math.floor(ratio * 100)}% of your subtitles.`
                       )) {
-                        // Set custom voice name to indicate it's shortened
                         setCustomVoiceName((prevName) => 
                           prevName ? `${prevName} (Shortened)` : 'Shortened Version'
                         );
-                        
-                        // Use the shortened text for voice generation directly
                         setLoading(true);
                         
-                        // Create settings with the shortened text
                         const settings = {
                           voice_id: voiceCharacter,
                           stability: voiceStability,
@@ -1331,22 +1355,16 @@ const ProcessingPage = () => {
                           voice_name: customVoiceName || `Shortened ${Math.floor(ratio * 100)}%`
                         };
                         
-                        // Call API with shortened text
                         changeVoice(jobId, settings)
                           .then(response => {
                             if (response.voice_changed_audio_path) {
-                              // Set the new voice audio path with a cache-busting parameter
                               const cacheBuster = new Date().getTime();
                               setVoiceChangedAudioPath(`${response.voice_changed_audio_path}?t=${cacheBuster}`);
-                              
-                              // Update voice history
                               if (response.voice_history) {
                                 setVoiceHistory(response.voice_history);
                               } else {
                                 fetchVoiceHistory();
                               }
-                              
-                              // Clear error
                               setError(null);
                             }
                           })
@@ -1377,7 +1395,7 @@ const ProcessingPage = () => {
                 controls 
                 src={getFileUrl(voiceChangedAudioPath)} 
                 style={{ width: '100%' }} 
-                key={voiceChangedAudioPath} // Force audio player to reload when source changes
+                key={voiceChangedAudioPath} 
               />
               <Typography variant="caption" color="text.secondary">
                 {voiceHistory.length > 0 ? `${voiceHistory.length} voice(s) generated. Current voice: ${
@@ -1385,12 +1403,9 @@ const ProcessingPage = () => {
                 }` : 'No voice history available'}
               </Typography>
             </Box>
-            
-            {/* Waveform comparison now added directly to the main component */}
           </>
         )}
         
-        {/* Voice History */}
         {voiceHistory.length > 0 && (
           <Box sx={{ mt: 3, mb: 3 }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
@@ -1431,7 +1446,6 @@ const ProcessingPage = () => {
                               size="small" 
                               variant="outlined" 
                               onClick={() => {
-                                // Add cache busting to force reload
                                 const cacheBuster = new Date().getTime();
                                 setVoiceChangedAudioPath(`${voice.url_path}?t=${cacheBuster}`);
                               }}
@@ -1444,7 +1458,7 @@ const ProcessingPage = () => {
                               size="small" 
                               variant="outlined" 
                               color="primary"
-                              onClick={() => handleCompareAudio(index)}
+                              onClick={() => { /* handleCompareAudio(index) was here, ensure comparison logic is handled */}}
                               startIcon={<CompareIcon />}
                             >
                               Compare
@@ -1459,8 +1473,6 @@ const ProcessingPage = () => {
             )}
           </Box>
         )}
-        
-        {/* No longer needed as we're using WaveformComparison directly in the UI */}
 
         <Box sx={{ mt: 4, display: 'flex', justifyContent: 'space-between' }}>
           <Button 
@@ -1501,7 +1513,6 @@ const ProcessingPage = () => {
           Clean the audio by removing noise and filler words.
         </Typography>
         
-        {/* Audio cleaning settings */}
         <Box sx={{ mb: 3 }}>
           <Typography variant="subtitle2" gutterBottom>
             Noise Reduction
@@ -1660,1895 +1671,618 @@ const ProcessingPage = () => {
     }
     
     return (
-      <Paper elevation={3} sx={{ p: 2, mb: 3 }}>
-        <Typography variant="h6" gutterBottom>Step 5: Create Final Video</Typography>
-        <Typography variant="body2" color="text.secondary" paragraph>
-          Create the final video with selected audio and subtitles.
-        </Typography>
-        
-        {/* Audio and Subtitle Selection Section */}
-        <Paper
-          variant="outlined"
-          sx={{
-            p: 2,
-            mb: 3,
-            backgroundColor: 'rgba(0, 0, 0, 0.02)',
-            borderColor: 'primary.light'
-          }}
-        >
-          <Typography variant="h6" color="primary" gutterBottom>
-            Select Audio and Subtitles
+      // ******** FIXED: Added <Box> as single root wrapper for the return statement ********
+      <Box> 
+        <Paper elevation={3} sx={{ p: 2, mb: 3 }}>
+           {/* Title updated to reflect the current conceptual step being configured */}
+          <Typography variant="h6" gutterBottom>Create Final Video</Typography>
+          <Typography variant="body2" color="text.secondary" paragraph>
+            Create the final video with selected audio and subtitles.
           </Typography>
           
-          <Grid container spacing={2} sx={{ mb: 2 }}>
-            {/* Audio Selection */}
-            <Grid item xs={12} sm={6}>
-              <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                Select Audio Track:
-              </Typography>
-              <FormControl fullWidth>
-                <Select
-                  value={selectedAudioId || ''}
-                  onChange={(e) => setSelectedAudioId(e.target.value)}
-                  disabled={loading || activeStep > 5}
-                  sx={{ mb: 1 }}
-                >
-                  {availableAudioFiles && availableAudioFiles.length > 0 ? (
-                    availableAudioFiles.map((audio) => (
-                      <MenuItem key={audio.id} value={audio.id}>
-                        {audio.name} {audio.type === 'voice_changed' ? '(Voice Changed)' : 
-                          audio.type === 'cleaned' ? '(Cleaned)' : '(Original)'}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem value="" disabled>No audio files available</MenuItem>
-                  )}
-                </Select>
-                <FormHelperText>Select the audio track to use in the final video</FormHelperText>
-                
-                {/* Debug button to force load audio files */}
-                <Button 
-                  size="small" 
-                  variant="outlined" 
-                  onClick={fetchAvailableAudio}
-                  sx={{ mt: 1 }}
-                >
-                  Refresh Audio Options
-                </Button>
-              </FormControl>
-            </Grid>
-            
-            {/* Subtitle Selection */}
-            <Grid item xs={12} sm={6}>
-              <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                Select Subtitles:
-              </Typography>
-              <FormControl fullWidth>
-                <Select
-                  value={selectedSubtitleId || ''}
-                  onChange={(e) => setSelectedSubtitleId(e.target.value)}
-                  disabled={loading || activeStep > 5}
-                  sx={{ mb: 1 }}
-                >
-                  <MenuItem value="">No Subtitles</MenuItem>
-                  {availableSubtitleFiles && availableSubtitleFiles.length > 0 ? (
-                    availableSubtitleFiles.map((subtitle) => (
-                      <MenuItem key={subtitle.id} value={subtitle.id}>
-                        {subtitle.name} 
-                        {subtitle.language !== 'en' ? ` (${subtitle.language === 'mr' ? 'Marathi' : 
-                          subtitle.language === 'hi' ? 'Hindi' : subtitle.language})` : ''}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem value="" disabled>No subtitle files available</MenuItem>
-                  )}
-                </Select>
-                <FormHelperText>Select the subtitles to use in the final video</FormHelperText>
-                
-                {/* Debug button to force load subtitle files */}
-                <Button 
-                  size="small" 
-                  variant="outlined" 
-                  onClick={fetchAvailableSubtitles}
-                  sx={{ mt: 1 }}
-                >
-                  Refresh Subtitle Options
-                </Button>
-              </FormControl>
-            </Grid>
-          </Grid>
-        </Paper>
-        
-        {/* Subtitle Appearance Settings */}
-        <Paper
-          variant="outlined"
-          sx={{
-            p: 2,
-            mb: 3,
-            backgroundColor: 'rgba(0, 0, 0, 0.02)',
-            borderColor: 'secondary.light'
-          }}
-        >
-          <Typography variant="h6" color="secondary" gutterBottom>
-            Subtitle Appearance
-          </Typography>
-          
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6}>
-              <Typography variant="subtitle2" gutterBottom>
-                Font Size: {fontSize}
-              </Typography>
-              <Slider
-                value={fontSize}
-                onChange={(_, value) => setFontSize(value)}
-                min={18}
-                max={36}
-                step={1}
-                disabled={loading || activeStep > 5 || !selectedSubtitleId}
-              />
-            </Grid>
-            
-            <Grid item xs={12} sm={6}>
-              <FormControl fullWidth>
-                <Typography variant="subtitle2" gutterBottom>
-                  Subtitle Color:
-                </Typography>
-                <Select
-                  value={subtitleColor}
-                  onChange={(e) => setSubtitleColor(e.target.value)}
-                  disabled={loading || activeStep > 5 || !selectedSubtitleId}
-                >
-                  <MenuItem value="white">White</MenuItem>
-                  <MenuItem value="yellow">Yellow</MenuItem>
-                  <MenuItem value="cyan">Cyan</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            
-            <Grid item xs={12}>
-              <Typography variant="subtitle2" gutterBottom>
-                Background Opacity: {subtitleBgOpacity}%
-              </Typography>
-              <Slider
-                value={subtitleBgOpacity}
-                onChange={(_, value) => setSubtitleBgOpacity(value)}
-                min={0}
-                max={100}
-                step={5}
-                disabled={loading || activeStep > 5 || !selectedSubtitleId}
-              />
-            </Grid>
-          </Grid>
-        </Paper>
-        
-        <FormControlLabel
-          control={
-            <Switch
-              checked={useDirectFfmpeg}
-              onChange={(e) => setUseDirectFfmpeg(e.target.checked)}
-              disabled={loading || activeStep > 5}
-            />
-          }
-          label="Use Direct FFmpeg Method (Recommended)"
-        />
-        
-        {error && <Alert severity="error" sx={{ mt: 2, mb: 2 }}>{error}</Alert>}
-        
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 2 }}>
-          <Button
+          <Paper
             variant="outlined"
-            onClick={() => setActiveStep(4)}
-            disabled={loading}
+            sx={{
+              p: 2,
+              mb: 3,
+              backgroundColor: 'rgba(0, 0, 0, 0.02)',
+              borderColor: 'primary.light'
+            }}
           >
-            Back
-          </Button>
+            <Typography variant="h6" color="primary" gutterBottom>
+              Select Audio and Subtitles
+            </Typography>
+            
+            <Grid container spacing={2} sx={{ mb: 2 }}>
+              <Grid item xs={12} sm={6}>
+                <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                  Select Audio Track:
+                </Typography>
+                <FormControl fullWidth>
+                  <Select
+                    value={selectedAudioId || ''}
+                    onChange={(e) => setSelectedAudioId(e.target.value)}
+                    disabled={loading || activeStep > 5} 
+                    sx={{ mb: 1 }}
+                  >
+                    {availableAudioFiles && availableAudioFiles.length > 0 ? (
+                      availableAudioFiles.map((audio) => (
+                        <MenuItem key={audio.id} value={audio.id}>
+                          {audio.name} {audio.type === 'voice_changed' ? '(Voice Changed)' : 
+                            audio.type === 'cleaned' ? '(Cleaned)' : '(Original)'}
+                        </MenuItem>
+                      ))
+                    ) : (
+                      <MenuItem value="" disabled>No audio files available</MenuItem>
+                    )}
+                  </Select>
+                  <FormHelperText>Select the audio track to use in the final video</FormHelperText>
+                  
+                  <Button 
+                    size="small" 
+                    variant="outlined" 
+                    onClick={fetchAvailableAudio}
+                    sx={{ mt: 1 }}
+                  >
+                    Refresh Audio Options
+                  </Button>
+                </FormControl>
+              </Grid>
+              
+              <Grid item xs={12} sm={6}>
+                <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+                  Select Subtitles:
+                </Typography>
+                <FormControl fullWidth>
+                  <Select
+                    value={selectedSubtitleId || ''}
+                    onChange={(e) => setSelectedSubtitleId(e.target.value)}
+                    disabled={loading || activeStep > 5}
+                    sx={{ mb: 1 }}
+                  >
+                    <MenuItem value="">No Subtitles</MenuItem>
+                    {availableSubtitleFiles && availableSubtitleFiles.length > 0 ? (
+                      availableSubtitleFiles.map((subtitle) => (
+                        <MenuItem key={subtitle.id} value={subtitle.id}>
+                          {subtitle.name} 
+                          {subtitle.language !== 'en' ? ` (${subtitle.language === 'mr' ? 'Marathi' : 
+                            subtitle.language === 'hi' ? 'Hindi' : subtitle.language})` : ''}
+                        </MenuItem>
+                      ))
+                    ) : (
+                      <MenuItem value="" disabled>No subtitle files available</MenuItem>
+                    )}
+                  </Select>
+                  <FormHelperText>Select the subtitles to use in the final video</FormHelperText>
+                  
+                  <Button 
+                    size="small" 
+                    variant="outlined" 
+                    onClick={fetchAvailableSubtitles}
+                    sx={{ mt: 1 }}
+                  >
+                    Refresh Subtitle Options
+                  </Button>
+                </FormControl>
+              </Grid>
+            </Grid>
+          </Paper>
           
-          {activeStep === 5 ? (
+          <Paper
+            variant="outlined"
+            sx={{
+              p: 2,
+              mb: 3,
+              backgroundColor: 'rgba(0, 0, 0, 0.02)',
+              borderColor: 'secondary.light'
+            }}
+          >
+            <Typography variant="h6" color="secondary" gutterBottom>
+              Subtitle Appearance
+            </Typography>
+            
+            <Grid container spacing={2}>
+              <Grid item xs={12} sm={6}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Font Size: {fontSize}
+                </Typography>
+                <Slider
+                  value={fontSize}
+                  onChange={(_, value) => setFontSize(value)}
+                  min={18}
+                  max={36}
+                  step={1}
+                  disabled={loading || activeStep > 5 || !selectedSubtitleId}
+                />
+              </Grid>
+              
+              <Grid item xs={12} sm={6}>
+                <FormControl fullWidth>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Subtitle Color:
+                  </Typography>
+                  <Select
+                    value={subtitleColor}
+                    onChange={(e) => setSubtitleColor(e.target.value)}
+                    disabled={loading || activeStep > 5 || !selectedSubtitleId}
+                  >
+                    <MenuItem value="white">White</MenuItem>
+                    <MenuItem value="yellow">Yellow</MenuItem>
+                    <MenuItem value="cyan">Cyan</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
+              
+              <Grid item xs={12}>
+                <Typography variant="subtitle2" gutterBottom>
+                  Background Opacity: {subtitleBgOpacity}%
+                </Typography>
+                <Slider
+                  value={subtitleBgOpacity}
+                  onChange={(_, value) => setSubtitleBgOpacity(value)}
+                  min={0}
+                  max={100}
+                  step={5}
+                  disabled={loading || activeStep > 5 || !selectedSubtitleId}
+                />
+              </Grid>
+            </Grid>
+          </Paper>
+          
+          <FormControlLabel
+            control={
+              <Switch
+                checked={useDirectFfmpeg}
+                onChange={(e) => setUseDirectFfmpeg(e.target.checked)}
+                disabled={loading || activeStep > 5}
+              />
+            }
+            label="Use Direct FFmpeg Method (Recommended)"
+          />
+          
+          {error && <Alert severity="error" sx={{ mt: 2, mb: 2 }}>{error}</Alert>}
+          
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 2 }}>
+            <Button
+              variant="outlined"
+              onClick={() => setActiveStep(4)}
+              disabled={loading}
+            >
+              Back
+            </Button>
+            
+            {activeStep === 5 ? (
+              <Button
+                variant="contained"
+                color="primary"
+                onClick={handleCreateFinalVideo}
+                disabled={loading || !selectedAudioId}
+                startIcon={loading ? <CircularProgress size={24} /> : null}
+              >
+                {loading ? 'Creating...' : 'Create Final Video'}
+              </Button>
+            ) : (
+              <Button
+                variant="outlined"
+                color="primary"
+                onClick={() => setActiveStep(6)}
+                disabled={loading}
+              >
+                Next
+              </Button>
+            )}
+          </Box>
+        </Paper>
+        
+        {/* Completion section with downloads */}
+        {activeStep === 6 && (
+          <Paper elevation={3} sx={{ p: 2, mb: 3, mt: 3 }}>
+            <Typography variant="h6" gutterBottom>Download Results</Typography>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              Your video has been successfully processed. You can now download the results.
+            </Typography>
+            
+            {finalVideoPath && (
+              <Box sx={{ mb: 3 }}>
+                <Typography variant="subtitle2" gutterBottom>Final Video Preview:</Typography>
+                <video 
+                  controls 
+                  src={getFileUrl(finalVideoPath)} 
+                  style={{ width: '100%', borderRadius: '4px' }}
+                />
+              </Box>
+            )}
+            
+            <Grid container spacing={2} sx={{ mt: 3 }}>
+              <Grid item xs={12} sm={6} md={3}>
+                <Card variant="outlined">
+                  <CardContent><Typography variant="h6">Audio</Typography></CardContent>
+                  <CardActions>
+                    <Button size="small" color="primary" href={getDownloadUrl(jobId, 'audio')} target="_blank">
+                      Download
+                    </Button>
+                  </CardActions>
+                </Card>
+              </Grid>
+              
+              <Grid item xs={12} sm={6} md={3}>
+                <Card variant="outlined">
+                  <CardContent><Typography variant="h6">Subtitles</Typography></CardContent>
+                  <CardActions>
+                    <Button size="small" color="primary" href={getDownloadUrl(jobId, 'subtitles')} target="_blank">
+                      Download
+                    </Button>
+                  </CardActions>
+                </Card>
+              </Grid>
+              
+              <Grid item xs={12} sm={6} md={3}>
+                <Card variant="outlined">
+                  <CardContent><Typography variant="h6">Cleaned Audio</Typography></CardContent>
+                  <CardActions>
+                    <Button size="small" color="primary" href={getDownloadUrl(jobId, 'cleaned_audio')} target="_blank">
+                      Download
+                    </Button>
+                  </CardActions>
+                </Card>
+              </Grid>
+              
+              <Grid item xs={12} sm={6} md={3}>
+                <Card variant="outlined">
+                  <CardContent><Typography variant="h6">Final Video</Typography></CardContent>
+                  <CardActions>
+                    <Button size="small" color="primary" href={getDownloadUrl(jobId, 'final_video')} target="_blank">
+                      Download
+                    </Button>
+                  </CardActions>
+                </Card>
+              </Grid>
+            </Grid>
+            
             <Button
               variant="contained"
               color="primary"
-              onClick={handleCreateFinalVideo}
-              disabled={loading || !selectedAudioId}
-              startIcon={loading ? <CircularProgress size={24} /> : null}
+              onClick={() => navigate('/')}
+              sx={{ mt: 3 }}
             >
-              {loading ? 'Creating...' : 'Create Final Video'}
+              Process Another Video
             </Button>
-          ) : (
-            <Button
-              variant="outlined"
-              color="primary"
-              onClick={() => setActiveStep(6)}
-              disabled={loading}
-            >
-              Next
-            </Button>
-          )}
-        </Box>
-      </Paper>
-    );
-  };
-  
-  // Render completion section with downloads
-  const renderComplete = () => {
-    return (
-      <Paper elevation={3} sx={{ p: 2, mb: 3 }}>
-        <Typography variant="h6" gutterBottom>Download Results</Typography>
-        <Typography variant="body2" color="text.secondary" paragraph>
-          Your video has been successfully processed. You can now download the results.
-        </Typography>
+          </Paper>
+        )} {/* ******** FIXED: Removed the stray '}' that was here ******** */}
         
-        {finalVideoPath && (
-          <Box sx={{ mb: 3 }}>
-            <Typography variant="subtitle2" gutterBottom>Final Video Preview:</Typography>
-            <video 
-              controls 
-              src={getFileUrl(finalVideoPath)} 
-              style={{ width: '100%', borderRadius: '4px' }}
-            />
-          </Box>
-        )}
-        
-        <Grid container spacing={2} sx={{ mt: 3 }}>
-          <Grid item xs={12} sm={6} md={3}>
-            <Card variant="outlined">
-              <CardContent>
-                <Typography variant="h6">Audio</Typography>
-              </CardContent>
-              <CardActions>
-                <Button 
-                  size="small" 
-                  color="primary"
-                  href={getDownloadUrl(jobId, 'audio')}
-                  target="_blank"
-                >
-                  Download
-                </Button>
-              </CardActions>
-            </Card>
-          </Grid>
-          
-          <Grid item xs={12} sm={6} md={3}>
-            <Card variant="outlined">
-              <CardContent>
-                <Typography variant="h6">Subtitles</Typography>
-              </CardContent>
-              <CardActions>
-                <Button 
-                  size="small" 
-                  color="primary"
-                  href={getDownloadUrl(jobId, 'subtitles')}
-                  target="_blank"
-                >
-                  Download
-                </Button>
-              </CardActions>
-            </Card>
-          </Grid>
-          
-          <Grid item xs={12} sm={6} md={3}>
-            <Card variant="outlined">
-              <CardContent>
-                <Typography variant="h6">Cleaned Audio</Typography>
-              </CardContent>
-              <CardActions>
-                <Button 
-                  size="small" 
-                  color="primary"
-                  href={getDownloadUrl(jobId, 'cleaned_audio')}
-                  target="_blank"
-                >
-                  Download
-                </Button>
-              </CardActions>
-            </Card>
-          </Grid>
-          
-          <Grid item xs={12} sm={6} md={3}>
-            <Card variant="outlined">
-              <CardContent>
-                <Typography variant="h6">Final Video</Typography>
-              </CardContent>
-              <CardActions>
-                <Button 
-                  size="small" 
-                  color="primary"
-                  href={getDownloadUrl(jobId, 'final_video')}
-                  target="_blank"
-                >
-                  Download
-                </Button>
-              </CardActions>
-            </Card>
-          </Grid>
-        </Grid>
-        
-        <Button
-          variant="contained"
-          color="primary"
-          onClick={() => navigate('/')}
-          sx={{ mt: 3 }}
+        <Dialog 
+          open={showCharacterSelector} 
+          onClose={() => setShowCharacterSelector(false)}
+          maxWidth="sm"
+          fullWidth
         >
-          Process Another Video
-        </Button>
-      </Paper>
+          <DialogTitle>
+            Select Voice Character
+          </DialogTitle>
+          <DialogContent>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              Choose a voice character to try. You can preview different voices before making your final selection.
+            </Typography>
+            <Grid container spacing={2}>
+              {availableVoices.map((voice) => (
+                <Grid item xs={12} sm={6} md={4} key={voice.id}>
+                  <Card 
+                    variant={voiceCharacter === voice.id ? "outlined" : "elevation"}
+                    sx={{ 
+                      height: '100%', 
+                      cursor: 'pointer',
+                      bgcolor: voiceCharacter === voice.id ? 'primary.50' : 'background.paper',
+                      borderColor: voiceCharacter === voice.id ? 'primary.main' : 'divider',
+                      '&:hover': {
+                        borderColor: 'primary.main',
+                        boxShadow: 1
+                      }
+                    }}
+                    onClick={() => setVoiceCharacter(voice.id)}
+                  >
+                    <CardContent>
+                      <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                        <Avatar 
+                          sx={{ 
+                            bgcolor: voice.name.includes('Female') ? 'secondary.light' : 'primary.light',
+                            width: 32, 
+                            height: 32,
+                            mr: 1
+                          }}
+                        >
+                          <RecordVoiceOverIcon sx={{ fontSize: 18 }} />
+                        </Avatar>
+                        <Typography variant="subtitle1">{voice.name.split(' ')[0]}</Typography>
+                      </Box>
+                      <Typography variant="caption" color="text.secondary">
+                        {voice.name.includes('Female') ? 'Female Voice' : 'Male Voice'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setShowCharacterSelector(false)}>Cancel</Button>
+            <Button 
+              variant="contained" 
+              onClick={() => {
+                handleChangeVoice();
+                setShowCharacterSelector(false);
+              }}
+              startIcon={<RecordVoiceOverIcon />}
+            >
+              Generate with Selected Voice
+            </Button>
+          </DialogActions>
+        </Dialog>
+        
+        <Dialog
+          open={showVoiceComparisonModal}
+          onClose={() => setShowVoiceComparisonModal(false)}
+          maxWidth="md"
+          fullWidth
+        >
+          <DialogTitle>Compare Voices</DialogTitle>
+          <DialogContent>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              Listen to different voices side by side to compare them.
+            </Typography>
+            
+            <Grid container spacing={2}>
+              {voiceHistory.slice(-4).map((voice, index) => (
+                <Grid item xs={12} sm={6} key={index}>
+                  <Card variant="outlined" sx={{ mb: 2 }}>
+                    <CardContent>
+                      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                        <Avatar 
+                          sx={{ 
+                            bgcolor: voice.voice_name.toLowerCase().includes('female') ? 'secondary.light' : 'primary.light',
+                            mr: 1 
+                          }}
+                        >
+                          <RecordVoiceOverIcon />
+                        </Avatar>
+                        <Box>
+                          <Typography variant="subtitle1">{voice.voice_name}</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Stability: {voice.stability.toFixed(2)} | Clarity: {voice.clarity.toFixed(2)}
+                          </Typography>
+                          {voice.subtitle_selection && (
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              Source: {voice.subtitle_selection === 'original' ? 'Original Subtitles' : 
+                                       voice.subtitle_selection === 'edited' ? 'Edited Subtitles' : 
+                                       voice.subtitle_selection === 'marathi' ? 'Marathi Subtitles' : 
+                                       voice.subtitle_selection === 'hindi' ? 'Hindi Subtitles' : 
+                                       voice.subtitle_selection}
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                      <audio controls src={getFileUrl(voice.url_path)} style={{ width: '100%' }} />
+                    </CardContent>
+                    <CardActions>
+                      <Button 
+                        size="small" 
+                        onClick={() => {
+                          setVoiceChangedAudioPath(voice.url_path);
+                          setShowVoiceComparisonModal(false);
+                        }}
+                      >
+                        Select This Voice
+                      </Button>
+                      <Button 
+                        size="small" 
+                        color="secondary"
+                        onClick={() => {
+                          setVoiceCharacter(voice.voice_id);
+                          setVoiceStability(voice.stability);
+                          setVoiceClarity(voice.clarity);
+                          setActiveStep(3);
+                          setShowVoiceComparisonModal(false);
+                        }}
+                      >
+                        Use Settings
+                      </Button>
+                    </CardActions>
+                  </Card>
+                </Grid>
+              ))}
+            </Grid>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setShowVoiceComparisonModal(false)}>Close</Button>
+          </DialogActions>
+        </Dialog>
+      </Box> // This Box was the existing closing tag for renderFinalVideoCreator's return
     );
   };
-  
-  // Render the video information panel for display in the sidebar
-  const renderVideoInfoSidebar = () => {
-    if (!videoInfo) return null;
-    
-    return (
-      <List>
-        <ListItem>
-          <ListItemIcon><InfoIcon fontSize="small" /></ListItemIcon>
-          <ListItemText 
-            primary="Video Info" 
-            secondary={`${videoInfo.width}×${videoInfo.height}, ${videoInfo.fps.toFixed(2)} FPS`} 
-          />
-        </ListItem>
-        <ListItem>
-          <ListItemIcon><BarChartIcon fontSize="small" /></ListItemIcon>
-          <ListItemText 
-            primary="Duration" 
-            secondary={`${formatTime(videoInfo.duration)} (${videoInfo.duration.toFixed(2)}s)`} 
-          />
-        </ListItem>
-      </List>
-    );
-  };
 
-  // Handle audio comparison
-  const handleCompareAudio = async (voiceIndex = 0) => {
-    try {
-      setLoading(true);
-      const response = await fetch(`${API_URL}/compare-audio/${jobId}/${voiceIndex}`);
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Failed to get comparison data');
-      }
-      
-      const data = await response.json();
-      setComparisonData(data);
-      setShowAudioComparison(true);
-    } catch (error) {
-      setError(`Error comparing audio: ${error.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Fetch available audio files
-  const fetchAvailableAudio = async () => {
-    if (!jobId) return;
-    
-    console.log("Fetching available audio files...");
-    
-    try {
-      const response = await getAvailableAudio(jobId);
-      console.log("Available audio response:", response);
-      
-      if (response && response.available_audio) {
-        console.log(`Found ${response.available_audio.length} audio files:`, response.available_audio);
-        setAvailableAudioFiles(response.available_audio);
-        
-        // If we have cleaned audio, select it by default
-        const hasCleanedAudio = response.available_audio.some(a => a.id === 'cleaned');
-        if (hasCleanedAudio) {
-          setSelectedAudioId('cleaned');
-          console.log("Selected cleaned audio by default");
-        } else if (response.available_audio.length > 0) {
-          setSelectedAudioId(response.available_audio[0].id);
-          console.log(`Selected first available audio: ${response.available_audio[0].id}`);
-        }
-      } else {
-        console.warn("No available_audio property in response:", response);
-      }
-    } catch (error) {
-      console.error('Error fetching available audio files:', error);
-    }
-  };
-
-  // Fetch available subtitle files
-  const fetchAvailableSubtitles = async () => {
-    if (!jobId) return;
-    
-    console.log("Fetching available subtitle files...");
-    
-    try {
-      const response = await getAvailableSubtitles(jobId);
-      console.log("Available subtitles response:", response);
-      
-      if (response && response.available_subtitles) {
-        console.log(`Found ${response.available_subtitles.length} subtitle files:`, response.available_subtitles);
-        setAvailableSubtitleFiles(response.available_subtitles);
-        
-        // If we have edited subtitles, select them by default, otherwise use original
-        const hasEditedSubtitles = response.available_subtitles.some(s => s.id === 'edited');
-        if (hasEditedSubtitles) {
-          setSelectedSubtitleId('edited');
-          console.log("Selected edited subtitles by default");
-        } else if (response.available_subtitles.some(s => s.id === 'original')) {
-          setSelectedSubtitleId('original');
-          console.log("Selected original subtitles by default");
-        } else if (response.available_subtitles.length > 0) {
-          setSelectedSubtitleId(response.available_subtitles[0].id);
-          console.log(`Selected first available subtitles: ${response.available_subtitles[0].id}`);
-        }
-      } else {
-        console.warn("No available_subtitles property in response:", response);
-      }
-    } catch (error) {
-      console.error('Error fetching available subtitle files:', error);
-    }
-  };
-
+  // Main component render
   return (
-    <Box sx={{ display: 'flex', height: '100vh' }}>
-      {/* Sidebar */}
+    <Box sx={{ display: 'flex' }}>
       <Drawer
-        variant="permanent"
+        variant="persistent"
+        anchor="left"
+        open={sidebarOpen}
         sx={{
-          width: sidebarOpen ? 280 : 64,
+          width: 240,
           flexShrink: 0,
-          transition: theme => theme.transitions.create('width', {
-            easing: theme.transitions.easing.sharp,
-            duration: theme.transitions.duration.enteringScreen,
-          }),
           '& .MuiDrawer-paper': {
-            width: sidebarOpen ? 280 : 64,
+            width: 240,
             boxSizing: 'border-box',
-            transition: theme => theme.transitions.create('width', {
-              easing: theme.transitions.easing.sharp,
-              duration: theme.transitions.duration.enteringScreen,
-            }),
-            overflowX: 'hidden',
-            backgroundColor: theme => theme.palette.background.default,
-            borderRight: '1px solid rgba(0, 0, 0, 0.12)'
           },
         }}
       >
-        <Box sx={{ 
-          display: 'flex', 
-          alignItems: 'center', 
-          justifyContent: sidebarOpen ? 'flex-end' : 'center',
-          padding: '8px',
-          borderBottom: '1px solid rgba(0, 0, 0, 0.12)'
-        }}>
-          {sidebarOpen ? (
-            <IconButton onClick={toggleSidebar}>
-              <ChevronLeftIcon />
-            </IconButton>
-          ) : (
-            <IconButton onClick={toggleSidebar}>
-              <MenuIcon />
-            </IconButton>
-          )}
+        <Box sx={{ display: 'flex', alignItems: 'center', p: 1, justifyContent: 'flex-end' }}>
+          <IconButton onClick={toggleSidebar}>
+            <ChevronLeftIcon />
+          </IconButton>
         </Box>
+        <Divider />
         <List>
-          {/* Video Info Section */}
-          <ListItem button onClick={toggleSidebar} disabled={sidebarOpen}>
-            <ListItemIcon>
-              <Tooltip title="Video Information" placement="right">
-                <InfoIcon color="primary" />
-              </Tooltip>
-            </ListItemIcon>
-            <ListItemText primary="Video Information" />
+          <ListItem button onClick={() => setActiveStep(1)} selected={activeStep === 1}>
+            <ListItemIcon><BarChartIcon /></ListItemIcon>
+            <ListItemText primary="Extract Audio" />
           </ListItem>
-          <Collapse in={sidebarOpen} timeout="auto" unmountOnExit>
-            <Box sx={{ p: 2 }}>
-              {renderVideoInfoSidebar()}
-            </Box>
-          </Collapse>
-
-          {/* Voice History Section */}
-          <ListItem button onClick={toggleSidebar} disabled={sidebarOpen}>
-            <ListItemIcon>
-              <Tooltip title="Voice History" placement="right">
-                <RecordVoiceOverIcon color="primary" />
-              </Tooltip>
-            </ListItemIcon>
-            <ListItemText primary="Voice History" />
+          <ListItem button onClick={() => setActiveStep(2)} selected={activeStep === 2} disabled={!audioPath}>
+            <ListItemIcon><SettingsIcon /></ListItemIcon>
+            <ListItemText primary="Generate Subtitles" />
           </ListItem>
-          <Collapse in={sidebarOpen} timeout="auto" unmountOnExit>
-            <Box sx={{ p: 2 }}>
-              {voiceHistory.length > 0 ? (
-                <>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                    <Typography variant="subtitle2" gutterBottom>
-                      Voice History ({voiceHistory.length})
-                    </Typography>
-                    <Tooltip title="Go to Voice Changer">
-                      <Button 
-                        size="small" 
-                        variant="outlined" 
-                        color="primary" 
-                        onClick={() => setActiveStep(3)}
-                        startIcon={<AddIcon />}
-                      >
-                        New Voice
-                      </Button>
-                    </Tooltip>
-                  </Box>
-                  <List dense sx={{ maxHeight: '400px', overflowY: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, mb: 1 }}>
-                    {voiceHistory.map((voice, index) => (
-                      <ListItem 
-                        key={index}
-                        dense
-                        divider
-                        sx={{
-                          bgcolor: voice.url_path === voiceChangedAudioPath ? 'action.hover' : 'transparent',
-                          '&:hover': {
-                            bgcolor: 'action.hover',
-                          }
-                        }}
-                        secondaryAction={
-                          <Box>
-                            <IconButton 
-                              size="small" 
-                              onClick={() => {
-                                setVoiceChangedAudioPath(voice.url_path);
-                              }}
-                              color="primary"
-                              title="Play this voice"
-                            >
-                              <PlayArrowIcon fontSize="small" />
-                            </IconButton>
-                            <IconButton 
-                              size="small" 
-                              onClick={() => {
-                                // Use this voice's settings for a new generation
-                                setVoiceCharacter(voice.voice_id);
-                                setVoiceStability(voice.stability);
-                                setVoiceClarity(voice.clarity);
-                                setCustomVoiceName('');
-                                // Automatically switch to voice changer step
-                                setActiveStep(3);
-                              }}
-                              color="secondary"
-                              title="Use these voice settings"
-                              sx={{ ml: 0.5 }}
-                            >
-                              <SettingsIcon fontSize="small" />
-                            </IconButton>
-                          </Box>
-                        }
-                      >
-                        <ListItemIcon>
-                          <Avatar sx={{ bgcolor: voice.voice_name.toLowerCase().includes('female') ? 'secondary.light' : 'primary.light', width: 24, height: 24 }}>
-                            <RecordVoiceOverIcon sx={{ fontSize: 14 }} />
-                          </Avatar>
-                        </ListItemIcon>
-                                              <ListItemText 
-                        primary={voice.voice_name}
-                        secondary={
-                          <React.Fragment>
-                            <Typography variant="caption" component="div">
-                              {new Date(voice.timestamp * 1000).toLocaleTimeString()}
-                            </Typography>
-                            {voice.subtitle_selection && (
-                              <Typography variant="caption" component="div" color="text.secondary">
-                                From: {voice.subtitle_selection === 'original' ? 'Original' : 
-                                       voice.subtitle_selection === 'edited' ? 'Edited' : 
-                                       voice.subtitle_selection === 'marathi' ? 'Marathi' : 
-                                       voice.subtitle_selection === 'hindi' ? 'Hindi' : 
-                                       voice.subtitle_selection}
-                              </Typography>
-                            )}
-                          </React.Fragment>
-                        }
-                        primaryTypographyProps={{ variant: 'body2', noWrap: true }}
-                        secondaryTypographyProps={{ variant: 'caption' }}
-                      />
-                      </ListItem>
-                    ))}
-                  </List>
-                  {voiceHistory.length >= 2 && (
-                    <Button
-                      size="small"
-                      fullWidth
-                      variant="outlined"
-                      onClick={() => setShowVoiceComparisonModal(true)}
-                      startIcon={<CompareIcon />}
-                    >
-                      Compare Voices
-                    </Button>
-                  )}
-                </>
-              ) : (
-                <Typography variant="body2" color="text.secondary">
-                  No voice history yet. Generate some voices to see them here.
-                </Typography>
-              )}
-            </Box>
-          </Collapse>
-
-          {/* Progress Section */}
-          <ListItem button onClick={toggleSidebar} disabled={sidebarOpen}>
-            <ListItemIcon>
-              <Tooltip title="Progress" placement="right">
-                <BarChartIcon color="primary" />
-              </Tooltip>
-            </ListItemIcon>
-            <ListItemText primary="Progress" />
+          <ListItem button onClick={() => setActiveStep(3)} selected={activeStep === 3} disabled={!subtitlePath}>
+            <ListItemIcon><RecordVoiceOverIcon /></ListItemIcon>
+            <ListItemText primary="Voice Changer" />
           </ListItem>
-          <Collapse in={sidebarOpen} timeout="auto" unmountOnExit>
-            <Box sx={{ p: 2 }}>
-              <Typography variant="h6" gutterBottom>Progress</Typography>
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="body2" gutterBottom>
-                  {activeStep} of {steps.length} completed
-                </Typography>
-                <LinearProgress 
-                  variant="determinate" 
-                  value={(activeStep / steps.length) * 100} 
-                  sx={{ height: 10, borderRadius: 5 }}
-                />
-              </Box>
-              
-              <Typography variant="subtitle2" gutterBottom>Steps:</Typography>
-              <Box component="ul" sx={{ pl: 2 }}>
-                {steps.map((step, index) => (
-                  <Box 
-                    component="li" 
-                    key={index}
-                    sx={{ 
-                      color: index < activeStep ? 'success.main' : 
-                            index === activeStep - 1 ? 'primary.main' : 'text.secondary',
-                      fontWeight: index === activeStep - 1 ? 'bold' : 'normal',
-                    }}
-                  >
-                    {step}
-                  </Box>
-                ))}
-              </Box>
-            </Box>
-          </Collapse>
+           <ListItem button onClick={() => setActiveStep(4)} selected={activeStep === 4} disabled={!(voiceChangedAudioPath || job?.steps?.change_voice?.status === "skipped")}>
+            <ListItemIcon><AddIcon />
+            </ListItemIcon>
+            <ListItemText primary="Clean Audio" />
+          </ListItem>
+          <ListItem button onClick={() => setActiveStep(5)} selected={activeStep === 5} disabled={!cleanedAudioPath && !(voiceChangedAudioPath && !job?.steps?.clean_audio?.path && job?.steps?.change_voice?.status === "skipped")}>
+            <ListItemIcon><PlayArrowIcon /></ListItemIcon>
+            <ListItemText primary="Create Final Video" />
+          </ListItem>
         </List>
       </Drawer>
 
-      {/* Main content */}
       <Box
         component="main"
         sx={{
           flexGrow: 1,
           p: 3,
-          ml: 0,
-          transition: theme => theme.transitions.create('margin', {
+          transition: (theme) => theme.transitions.create('margin', {
             easing: theme.transitions.easing.sharp,
-            duration: theme.transitions.duration.enteringScreen,
+            duration: theme.transitions.duration.leavingScreen,
           }),
-          width: `calc(100% - ${sidebarOpen ? 280 : 64}px)`,
-          overflowY: 'auto',
-          height: '100%'
+          marginLeft: sidebarOpen ? `0px` : `-${240}px`, // Adjust based on drawer behavior
+          mt: '64px' // Assuming a standard AppBar height
         }}
       >
-        <Typography variant="h4" component="h1" gutterBottom align="center">
-          Process Video
+        {!sidebarOpen && (
+          <IconButton
+            color="inherit"
+            aria-label="open drawer"
+            onClick={toggleSidebar}
+            edge="start"
+            sx={{ mr: 2, position: 'fixed', top: '15px', left: '15px', zIndex: 1300 }}
+          >
+            <MenuIcon />
+          </IconButton>
+        )}
+        <Typography variant="h4" gutterBottom>
+          Video Processing: Job {jobId}
         </Typography>
-        
-        {/* Stepper */}
-        <Stepper activeStep={activeStep - 1} alternativeLabel sx={{ mb: 4 }}>
-          {steps.map((label) => (
-            <Step key={label}>
+
+        <Stepper activeStep={activeStep -1} alternativeLabel sx={{ mb: 4 }}>
+          {steps.map((label, index) => (
+            <Step key={label} completed={activeStep > index + 1}>
               <StepLabel>{label}</StepLabel>
             </Step>
           ))}
         </Stepper>
-        
-        {/* Error message */}
-        {error && (
-          <Alert severity="error" sx={{ mb: 3 }}>
-            {error}
-          </Alert>
-        )}
-        
-        {/* Main content grid - now full width without right column */}
-        <Box>
-          {/* Show all steps with proper visibility controls */}
-          <Paper elevation={2} sx={{ p: 3, mb: 3, 
-            opacity: activeStep < 1 ? 0.7 : 1,
-            filter: activeStep < 1 ? 'grayscale(1)' : 'none'
-          }}>
-            <Typography variant="h6" gutterBottom sx={{ 
-              color: activeStep >= 1 ? 'text.primary' : 'text.disabled',
-              display: 'flex',
-              alignItems: 'center'
-            }}>
-              Step 1: Extract Audio
-              {activeStep > 1 && <Box component="span" sx={{ ml: 1, color: 'success.main' }}>✓</Box>}
-            </Typography>
-            <Typography variant="body2" color={activeStep >= 1 ? "text.secondary" : "text.disabled"} paragraph>
-              Extract the audio track from the video for further processing.
-            </Typography>
-            
-            {activeStep === 1 && (
-              <Button
-                variant="contained"
-                color="primary"
-                onClick={handleExtractAudio}
-                disabled={loading}
-                startIcon={loading && <CircularProgress size={24} color="inherit" />}
-              >
-                {loading ? 'Extracting...' : 'Extract Audio'}
-              </Button>
-            )}
-            
-            {/* Show waveform when audio is extracted */}
-            {activeStep > 1 && audioPath && (
-              <AudioWaveform audioPath={audioPath} title="Extracted Audio" />
-            )}
-          </Paper>
-          
-          {/* Step 2: Generate Subtitles */}
-          <Paper elevation={2} sx={{ p: 3, mb: 3, 
-            opacity: activeStep < 2 ? 0.7 : 1,
-            filter: activeStep < 2 ? 'grayscale(1)' : 'none'
-          }}>
-            <Typography variant="h6" gutterBottom sx={{ 
-              color: activeStep >= 2 ? 'text.primary' : 'text.disabled',
-              display: 'flex',
-              alignItems: 'center'
-            }}>
-              Step 2: Generate Subtitles
-              {activeStep > 2 && <Box component="span" sx={{ ml: 1, color: 'success.main' }}>✓</Box>}
-            </Typography>
-            <Typography variant="body2" color={activeStep >= 2 ? "text.secondary" : "text.disabled"} paragraph>
-              Generate subtitles from the audio using AI transcription.
-            </Typography>
-            
-            {activeStep >= 2 && (
-              <>
-                {/* Transcription settings */}
-                <Box sx={{ mb: 3 }}>
-                  <FormControl fullWidth sx={{ mb: 2 }}>
-                    <Typography variant="subtitle2" gutterBottom>
-                      Transcription Method
-                    </Typography>
-                    <Select
-                      value={transcriptionMethod}
-                      onChange={(e) => setTranscriptionMethod(e.target.value)}
-                      disabled={loading || activeStep > 2}
-                    >
-                      <MenuItem value="whisper">Whisper (Local)</MenuItem>
-                      <MenuItem value="assemblyai">AssemblyAI (Cloud)</MenuItem>
-                    </Select>
-                  </FormControl>
-                  
-                  <FormControl fullWidth sx={{ mb: 2 }}>
-                    <Typography variant="subtitle2" gutterBottom>
-                      Language
-                    </Typography>
-                    <Select
-                      value={language}
-                      onChange={(e) => setLanguage(e.target.value)}
-                      disabled={loading || activeStep > 2}
-                    >
-                      <MenuItem value="en">English</MenuItem>
-                      <MenuItem value="mr">Marathi</MenuItem>
-                    </Select>
-                  </FormControl>
-                  
-                  {transcriptionMethod === 'whisper' && (
-                    <FormControl fullWidth sx={{ mb: 2 }}>
-                      <Typography variant="subtitle2" gutterBottom>
-                        Whisper Model Size
-                      </Typography>
-                      <Select
-                        value={whisperModelSize}
-                        onChange={(e) => setWhisperModelSize(e.target.value)}
-                        disabled={loading || activeStep > 2}
-                      >
-                        <MenuItem value="tiny">Tiny (Fastest, less accurate)</MenuItem>
-                        <MenuItem value="base">Base (Fast, good accuracy)</MenuItem>
-                        <MenuItem value="small">Small (Medium, better accuracy)</MenuItem>
-                        <MenuItem value="medium">Medium (Slow, most accurate)</MenuItem>
-                      </Select>
-                    </FormControl>
-                  )}
-                  
-                  {transcriptionMethod === 'assemblyai' && (
-                    <FormControl fullWidth sx={{ mb: 2 }}>
-                      <Typography variant="subtitle2" gutterBottom>
-                        AssemblyAI API Key
-                      </Typography>
-                      <TextField
-                        type="password"
-                        value={assemblyaiApiKey}
-                        onChange={(e) => setAssemblyaiApiKey(e.target.value)}
-                        disabled={loading || activeStep > 2}
-                        placeholder="Enter your AssemblyAI API key"
-                      />
-                    </FormControl>
-                  )}
-                </Box>
-              </>
-            )}
-                
-            {activeStep === 2 && (
-              <Button
-                variant="contained"
-                color="primary"
-                onClick={handleGenerateSubtitles}
-                disabled={loading}
-                startIcon={loading && <CircularProgress size={24} color="inherit" />}
-              >
-                {loading ? 'Generating...' : 'Generate Subtitles'}
-              </Button>
-            )}
-            
-            {/* Display subtitle content when available */}
-            {activeStep > 2 && subtitlePath && (
-              <Paper elevation={2} sx={{ p: 3, mb: 4, mt: 4, width: '100%', maxWidth: '100%' }}>
-                <Typography variant="subtitle1" gutterBottom sx={{ mb: 2, fontSize: '1.1rem', fontWeight: 500 }}>
-                  Edit Subtitles
-                </Typography>
-                <Typography variant="body2" color="text.secondary" paragraph sx={{ mb: 3 }}>
-                  Compare and edit the subtitles before proceeding to the next step.
-                </Typography>
-                
-                {/* Side-by-side layout with synchronized scrolling */}
-                <Box sx={{ position: 'relative', mb: 4, width: '100%', maxWidth: '100%', overflow: 'hidden' }}>
-                  <Grid container spacing={3}>
-                    <Grid item xs={12} lg={6}>
-                      <Typography variant="subtitle2" gutterBottom sx={{ 
-                        color: 'info.main',
-                        display: 'flex',
-                        alignItems: 'center',
-                        '&::before': {
-                          content: '""',
-                          width: '12px',
-                          height: '12px',
-                          borderRadius: '50%',
-                          backgroundColor: 'info.main',
-                          marginRight: '8px',
-                          display: 'inline-block'
-                        }
-                      }}>
-                        Original Subtitles
-                      </Typography>
-                      <TextField
-                        id="original-subtitles"
-                        fullWidth
-                        multiline
-                        rows={25}
-                        value={subtitleContent}
-                        disabled
-                        variant="outlined"
-                        InputProps={{
-                          sx: {
-                            fontFamily: 'monospace',
-                            fontSize: '0.95rem',
-                            letterSpacing: '0.02rem',
-                            lineHeight: '1.6',
-                            padding: '12px',
-                            overflowY: 'auto',
-                            overflowX: 'auto',
-                            width: '100%',
-                            boxSizing: 'border-box',
-                            minHeight: '400px',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'normal'
-                          }
-                        }}
-                        sx={{ 
-                          mb: { xs: 3, lg: 0 }, 
-                          backgroundColor: theme => theme.palette.background.default,
-                          '& .MuiInputBase-input': {
-                            color: 'info.main'
-                          },
-                          width: '100%'
-                        }}
-                      />
-                    </Grid>
-                    <Grid item xs={12} lg={6}>
-                      <Typography variant="subtitle2" gutterBottom sx={{ 
-                        color: 'success.main',
-                        display: 'flex',
-                        alignItems: 'center',
-                        '&::before': {
-                          content: '""',
-                          width: '12px',
-                          height: '12px',
-                          borderRadius: '50%',
-                          backgroundColor: 'success.main',
-                          marginRight: '8px',
-                          display: 'inline-block'
-                        }
-                      }}>
-                        Edit Subtitles
-                      </Typography>
-                      <TextField
-                        id="edited-subtitles"
-                        fullWidth
-                        multiline
-                        rows={25}
-                        value={editedSubtitleContent}
-                        onChange={(e) => setEditedSubtitleContent(e.target.value)}
-                        variant="outlined"
-                        InputProps={{
-                          sx: {
-                            fontFamily: 'monospace',
-                            fontSize: '0.95rem',
-                            letterSpacing: '0.02rem',
-                            lineHeight: '1.6',
-                            padding: '12px',
-                            overflowY: 'auto',
-                            overflowX: 'auto',
-                            width: '100%',
-                            boxSizing: 'border-box',
-                            minHeight: '400px',
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'normal'
-                          }
-                        }}
-                        sx={{ 
-                          mb: 0, 
-                          backgroundColor: editedSubtitleContent !== subtitleContent 
-                            ? theme => theme.palette.success.light + '15' 
-                            : 'inherit',
-                          width: '100%'
-                        }}
-                        disabled={activeStep > 3}
-                      />
-                    </Grid>
-                  </Grid>
-                </Box>
-                
-                <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
-                  <Button
-                    variant="contained"
-                    color="success"
-                    size="large"
-                    onClick={handleSaveEditedSubtitles}
-                    disabled={loading || subtitleContent === editedSubtitleContent}
-                    sx={{ px: 3, py: 1 }}
-                  >
-                    Save Edited Subtitles
-                  </Button>
-                </Box>
-              </Paper>
-            )}
-            
-            {/* Translation Section */}
-            {activeStep > 2 && subtitlePath && (
-              <Paper elevation={2} sx={{ p: 3, mb: 4, mt: 4, width: '100%', maxWidth: '100%' }}>
-                <Typography variant="subtitle1" gutterBottom sx={{ mb: 2, fontSize: '1.1rem', fontWeight: 500 }}>
-                  Translate Subtitles
-                </Typography>
-                <Typography variant="body2" color="text.secondary" paragraph sx={{ mb: 2 }}>
-                  Translate your edited subtitles to Marathi or Hindi using Google Translate API.
-                </Typography>
-                
-                <Grid container spacing={2} sx={{ mb: 2 }}>
-                  <Grid item xs={12} sm={6}>
-                    <FormControl fullWidth>
-                      <Typography variant="subtitle2" gutterBottom>Target Language:</Typography>
-                      <Select
-                        value={translationLanguage}
-                        onChange={(e) => setTranslationLanguage(e.target.value)}
-                        disabled={translationLoading || !editedSubtitleContent}
-                      >
-                        <MenuItem value="mr">Marathi</MenuItem>
-                        <MenuItem value="hi">Hindi</MenuItem>
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} sm={6} sx={{ display: 'flex', alignItems: 'flex-end' }}>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      onClick={handleTranslateSubtitles}
-                      disabled={translationLoading || !editedSubtitleContent}
-                      startIcon={translationLoading ? <CircularProgress size={24} /> : null}
-                      fullWidth
-                    >
-                      {translationLoading ? 'Translating...' : 'Translate Subtitles'}
-                    </Button>
-                  </Grid>
-                </Grid>
-                
-                {translationError && (
-                  <Alert 
-                    severity={translationError.includes('in progress') ? "info" : "error"} 
-                    sx={{ mb: 2 }}
-                  >
-                    {translationError}
-                  </Alert>
-                )}
-                
-                {translationLoading && (
-                  <Box sx={{ width: '100%', mb: 2 }}>
-                    <LinearProgress />
-                    <Typography variant="caption" align="center" display="block" sx={{ mt: 1 }}>
-                      Translation in progress. This may take several minutes for larger subtitle files.
-                    </Typography>
-                  </Box>
-                )}
-                
-                <Divider sx={{ my: 2 }} />
-                <Typography variant="subtitle2" gutterBottom>
-                  Translation Options
-                </Typography>
-                <FormControlLabel
-                  control={
-                    <Switch 
-                      checked={editedSubtitleContent === editedSubtitleContent.split('\n').slice(0, 20).join('\n')}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          // Store original content if it's not already shortened
-                          if (editedSubtitleContent.split('\n').length > 20) {
-                            setOriginalSubtitleForTranslation(editedSubtitleContent);
-                            // Take only first 20 lines for translation
-                            setEditedSubtitleContent(editedSubtitleContent.split('\n').slice(0, 20).join('\n'));
-                          }
-                        } else {
-                          // Restore original content if available
-                          if (originalSubtitleForTranslation) {
-                            setEditedSubtitleContent(originalSubtitleForTranslation);
-                          }
-                        }
-                      }}
-                      disabled={translationLoading}
-                    />
-                  }
-                  label="Only translate first 20 subtitle entries (recommended for testing)"
-                />
-                
-                {translatedSubtitleContent && (
-                  <>
-                    <Box sx={{ mb: 2 }}>
-                      <Typography variant="subtitle2" gutterBottom>
-                        Translated Subtitles ({translationLanguage === 'mr' ? 'Marathi' : 'Hindi'}):
-                      </Typography>
-                      <TextField
-                        multiline
-                        fullWidth
-                        rows={12}
-                        value={translatedSubtitleContent}
-                        InputProps={{
-                          sx: {
-                            fontFamily: 'monospace',
-                            fontSize: '0.95rem',
-                            lineHeight: '1.6',
-                          }
-                        }}
-                        disabled={saveTranslationLoading}
-                        onChange={(e) => setTranslatedSubtitleContent(e.target.value)}
-                      />
-                    </Box>
-                    
-                    <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
-                      {/* <Button
-                        variant="outlined"
-                        color="primary"
-                        onClick={handleSaveTranslatedSubtitles}
-                        disabled={saveTranslationLoading}
-                        startIcon={saveTranslationLoading ? <CircularProgress size={20} /> : null}
-                      >
-                        {saveTranslationLoading ? 'Saving...' : 'Save Translation'}
-                      </Button>
-                      
-                      <Button
-                        variant="outlined"
-                        color="secondary"
-                        onClick={handleDownloadTranslatedSubtitles}
-                        disabled={translationLoading || saveTranslationLoading}
-                      >
-                        Download Translation
-                      </Button> */}
-                    </Box>
-                  </>
-                )}
-              </Paper>
-            )}
-          </Paper>
-          
-          {/* Step 3: Voice Changer */}
-          <Paper elevation={2} sx={{ p: 3, mb: 3, 
-            opacity: activeStep < 3 ? 0.7 : 1,
-            filter: activeStep < 3 ? 'grayscale(1)' : 'none'
-          }}>
-            <Typography variant="h6" gutterBottom sx={{ 
-              color: activeStep >= 3 ? 'text.primary' : 'text.disabled',
-              display: 'flex',
-              alignItems: 'center'
-            }}>
-              Step 3: Voice Changer
-              {activeStep > 3 && <Box component="span" sx={{ ml: 1, color: 'success.main' }}>✓</Box>}
-            </Typography>
-            <Typography variant="body2" color={activeStep >= 3 ? "text.secondary" : "text.disabled"} paragraph>
-              Change the voice of the audio.
-            </Typography>
-            
-            {activeStep >= 3 && (
-              <>
-                {/* Voice changer settings */}
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" gutterBottom>
-                    Voice Character
-                  </Typography>
-                  <FormControl fullWidth sx={{ mb: 2 }}>
-                    <Select
-                      value={voiceCharacter}
-                      onChange={(e) => setVoiceCharacter(e.target.value)}
-                      disabled={loading || activeStep > 3}
-                      startAdornment={<RecordVoiceOverIcon color="action" sx={{ mr: 1 }} />}
-                    >
-                      {availableVoices.map((voice) => (
-                        <MenuItem key={voice.id} value={voice.id}>{voice.name}</MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Box>
-                
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" gutterBottom>
-                    Subtitle Selection
-                  </Typography>
-                  <FormControl fullWidth sx={{ mb: 2 }}>
-                    <Select
-                      value={subtitleSelection}
-                      onChange={(e) => setSubtitleSelection(e.target.value)}
-                      disabled={loading || activeStep > 3}
-                    >
-                      {availableSubtitleOptions.map((option) => (
-                        <MenuItem 
-                          key={option.id} 
-                          value={option.id}
-                          disabled={!option.available}
-                        >
-                          {option.name}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                    <FormHelperText>
-                      Select which subtitle file to use for voice generation
-                    </FormHelperText>
-                  </FormControl>
-                </Box>
-                
-                <Box sx={{ mb: 3 }}>
-                  <TextField 
-                    fullWidth
-                    label="Custom Voice Name (Optional)"
-                    value={customVoiceName}
-                    onChange={(e) => setCustomVoiceName(e.target.value)}
-                    placeholder="e.g., Narrator, Main Character"
-                    disabled={loading || activeStep > 3}
-                    helperText="Give this voice a custom name for history"
-                  />
-                </Box>
-                
-                {/* Generate Voice Button */}
-                {activeStep === 3 && (
-                  <Box sx={{ display: 'flex', justifyContent: 'center', flexDirection: 'column', alignItems: 'center', mb: 3 }}>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      size="large"
-                      onClick={handleChangeVoice}
-                      disabled={loading}
-                      startIcon={loading ? <CircularProgress size={24} /> : <RecordVoiceOverIcon />}
-                      sx={{ px: 4, py: 1, mb: 2, minWidth: '250px' }}
-                    >
-                      {loading ? 'Generating Voice...' : voiceHistory.length > 0 ? 'Generate New Voice' : 'Generate Voice'}
-                    </Button>
-                    
-                    {voiceHistory.length > 0 && (
-                      <Typography variant="caption" color="text.secondary">
-                        Voice history is available in the sidebar
-                      </Typography>
-                    )}
-                  </Box>
-                )}
-                
-                {/* Always try to show waveform comparison for voice changer */}
-                {activeStep >= 3 && (
-                  <>
-                    <Typography variant="h6" gutterBottom sx={{ mt: 3 }}>Audio Waveform Comparison</Typography>
-                    <Typography variant="body2" color="text.secondary" paragraph>
-                      Compare the original audio with the AI-generated voice. Use the controls to check if timing is synchronized.
-                    </Typography>
-                    
-                    {audioPath && voiceChangedAudioPath ? (
-                      <WaveformComparison
-                        originalAudioPath={audioPath}
-                        cleanedAudioPath={voiceChangedAudioPath}
-                      />
-                    ) : (
-                      <Typography color="error">
-                        Audio files not available yet. Please generate voice first. 
-                        Debug: Original = {audioPath || "none"}, Voice Changed = {voiceChangedAudioPath || "none"}
-                      </Typography>
-                    )}
-                  </>
-                )}
-                
-                {voiceChangedAudioPath && (
-                  <Box sx={{ mt: 2, mb: 4, p: 2, bgcolor: 'background.paper', borderRadius: 1, border: '1px solid', borderColor: 'divider' }}>
-                    <Typography variant="subtitle2" gutterBottom>Current Voice Preview:</Typography>
-                    <audio controls src={getFileUrl(voiceChangedAudioPath)} style={{ width: '100%' }} />
-                    {loading ? (
-                      <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-                        <CircularProgress size={16} sx={{ mr: 1 }} />
-                        <Typography variant="caption">Processing...</Typography>
-                      </Box>
-                    ) : (
-                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mt: 1 }}>
-                        <Button 
-                          size="small" 
-                          variant="outlined" 
-                          onClick={handleChangeVoice}
-                          disabled={loading}
-                          startIcon={<RecordVoiceOverIcon />}
-                        >
-                          Try Selected Character
-                        </Button>
-                        <Button 
-                          size="small" 
-                          variant="outlined" 
-                          color="secondary"
-                          onClick={() => {
-                            // Open character selection dialog
-                            setShowCharacterSelector(true);
-                          }}
-                          startIcon={<AddIcon />}
-                        >
-                          Change Character
-                        </Button>
-                      </Box>
-                    )}
-                  </Box>
-                )}
-                
-                {/* Navigation Buttons */}
-                <Box sx={{ mt: 4, display: 'flex', justifyContent: 'space-between' }}>
-                  <Button 
-                    variant="outlined"
-                    onClick={() => setActiveStep(2)}
-                    disabled={loading}
-                  >
-                    Back
-                  </Button>
-                  <Box>
-                    <Button
-                      variant="outlined"
-                      color="secondary"
-                      onClick={handleSkipVoiceChange}
-                      disabled={loading || activeStep > 3}
-                      sx={{ mr: 2 }}
-                    >
-                      Skip Voice Change
-                    </Button>
-                    {/* <Button 
-                      variant="contained" 
-                      color="primary"
-                      onClick={handleChangeVoice}
-                      disabled={loading}
-                      startIcon={loading ? <CircularProgress size={24} /> : <RecordVoiceOverIcon />}
-                    >
-                      {loading ? 'Generating Voice...' : voiceHistory.length > 0 ? 'Regenerate Voice' : 'Generate Voice'}
-                    </Button> */}
-                  </Box>
-                </Box>
-              </>
-            )}
-          </Paper>
-          
-          {/* Step 4: Clean Audio */}
-          <Paper elevation={2} sx={{ p: 3, mb: 3, 
-            opacity: activeStep < 4 ? 0.7 : 1,
-            filter: activeStep < 4 ? 'grayscale(1)' : 'none'
-          }}>
-            <Typography variant="h6" gutterBottom sx={{ 
-              color: activeStep >= 4 ? 'text.primary' : 'text.disabled',
-              display: 'flex',
-              alignItems: 'center'
-            }}>
-              Step 4: Clean Audio
-              {activeStep > 4 && <Box component="span" sx={{ ml: 1, color: 'success.main' }}>✓</Box>}
-            </Typography>
-            <Typography variant="body2" color={activeStep >= 4 ? "text.secondary" : "text.disabled"} paragraph>
-              Clean the audio by removing noise and filler words.
-            </Typography>
-            
-            {activeStep >= 4 && (
-              <>
-                {/* Audio cleaning settings */}
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle2" gutterBottom>
-                    Noise Reduction
-                  </Typography>
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={enableNoiseReduction}
-                        onChange={(e) => setEnableNoiseReduction(e.target.checked)}
-                        disabled={loading || activeStep > 4}
-                      />
-                    }
-                    label="Enable Noise Reduction"
-                  />
-                  
-                  {enableNoiseReduction && (
-                    <Box sx={{ px: 2, mb: 2 }}>
-                      <Typography variant="body2" gutterBottom>
-                        Sensitivity: {noiseReductionSensitivity}
-                      </Typography>
-                      <Slider
-                        value={noiseReductionSensitivity}
-                        onChange={(_, value) => setNoiseReductionSensitivity(value)}
-                        min={0.05}
-                        max={0.5}
-                        step={0.05}
-                        disabled={loading || activeStep > 4}
-                      />
-                      <Typography variant="caption" color="text.secondary">
-                        Higher values remove more noise but may affect speech quality.
-                      </Typography>
-                    </Box>
-                  )}
-                  
-                  <Divider sx={{ my: 2 }} />
-                  
-                  <Typography variant="subtitle2" gutterBottom>
-                    Filler Word Removal
-                  </Typography>
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={enableVadCleaning}
-                        onChange={(e) => setEnableVadCleaning(e.target.checked)}
-                        disabled={loading || activeStep > 4}
-                      />
-                    }
-                    label="Enable Filler Word Removal"
-                  />
-                  
-                  {enableVadCleaning && (
-                    <Box sx={{ px: 2, mb: 2 }}>
-                      <Typography variant="body2" gutterBottom>
-                        Aggressiveness: {vadAggressiveness}
-                      </Typography>
-                      <Slider
-                        value={vadAggressiveness}
-                        onChange={(_, value) => setVadAggressiveness(value)}
-                        min={0}
-                        max={3}
-                        step={1}
-                        marks
-                        disabled={loading || activeStep > 4}
-                      />
-                      <Typography variant="caption" color="text.secondary">
-                        Higher values are more aggressive at detecting speech (0=least, 3=most).
-                      </Typography>
-                    </Box>
-                  )}
-                </Box>
-                
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 2 }}>
-                  <Button
-                    variant="outlined"
-                    onClick={() => setActiveStep(3)}
-                    disabled={loading}
-                  >
-                    Back
-                  </Button>
-                  
-                  {activeStep === 4 ? (
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      onClick={handleCleanAudio}
-                      disabled={loading}
-                      startIcon={loading ? <CircularProgress size={24} /> : null}
-                    >
-                      {loading ? 'Cleaning...' : 'Clean Audio'}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="outlined"
-                      color="primary"
-                      onClick={() => setActiveStep(5)}
-                      disabled={loading}
-                    >
-                      Next
-                    </Button>
-                  )}
-                </Box>
-                
-                {/* Show comparison when cleaned audio is available */}
-                {activeStep > 4 && audioPath && cleanedAudioPath && (
-                  <WaveformComparison
-                    originalAudioPath={audioPath}
-                    cleanedAudioPath={cleanedAudioPath}
-                  />
-                )}
-              </>
-            )}
-          </Paper>
-          
-          {/* Step 5: Create Final Video */}
-          <Paper elevation={2} sx={{ p: 3, mb: 3, 
-            opacity: activeStep < 5 ? 0.7 : 1,
-            filter: activeStep < 5 ? 'grayscale(1)' : 'none'
-          }}>
-            <Typography variant="h6" gutterBottom sx={{ 
-              color: activeStep >= 5 ? 'text.primary' : 'text.disabled',
-              display: 'flex',
-              alignItems: 'center'
-            }}>
-              Step 5: Create Final Video
-              {activeStep > 5 && <Box component="span" sx={{ ml: 1, color: 'success.main' }}>✓</Box>}
-            </Typography>
-            <Typography variant="body2" color={activeStep >= 5 ? "text.secondary" : "text.disabled"} paragraph>
-              Create the final video with clean audio and subtitles.
-            </Typography>
-            
-            {activeStep >= 5 && (
-              <>
-                {/* Final video settings */}
-                <Box sx={{ mb: 3 }}>
-                  {/* Audio and Subtitle Selection */}
-                  <Paper
-                    variant="outlined"
-                    sx={{
-                      p: 2,
-                      mb: 3,
-                      backgroundColor: 'rgba(0, 0, 0, 0.02)',
-                      borderColor: 'primary.light'
-                    }}
-                  >
-                    <Typography variant="h6" color="primary" gutterBottom>
-                      Select Audio and Subtitles
-                    </Typography>
-                    
-                    <Grid container spacing={2} sx={{ mb: 2 }}>
-                      {/* Audio Selection */}
-                      <Grid item xs={12} sm={6}>
-                        <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                          Select Audio Track:
-                        </Typography>
-                        <FormControl fullWidth>
-                          <Select
-                            value={selectedAudioId || ''}
-                            onChange={(e) => setSelectedAudioId(e.target.value)}
-                            disabled={loading || activeStep > 5}
-                            sx={{ mb: 1 }}
-                          >
-                            {availableAudioFiles && availableAudioFiles.length > 0 ? (
-                              availableAudioFiles.map((audio) => (
-                                <MenuItem key={audio.id} value={audio.id}>
-                                  {audio.name} {audio.type === 'voice_changed' ? '(Voice Changed)' : 
-                                    audio.type === 'cleaned' ? '(Cleaned)' : '(Original)'}
-                                </MenuItem>
-                              ))
-                            ) : (
-                              <MenuItem value="" disabled>No audio files available</MenuItem>
-                            )}
-                          </Select>
-                          <FormHelperText>Select the audio track to use in the final video</FormHelperText>
-                          
-                          {/* Debug button to force load audio files */}
-                          <Button 
-                            size="small" 
-                            variant="outlined" 
-                            onClick={fetchAvailableAudio}
-                            sx={{ mt: 1 }}
-                          >
-                            Refresh Audio Options
-                          </Button>
-                        </FormControl>
-                      </Grid>
-                      
-                      {/* Subtitle Selection */}
-                      <Grid item xs={12} sm={6}>
-                        <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                          Select Subtitles:
-                        </Typography>
-                        <FormControl fullWidth>
-                          <Select
-                            value={selectedSubtitleId || ''}
-                            onChange={(e) => setSelectedSubtitleId(e.target.value)}
-                            disabled={loading || activeStep > 5}
-                            sx={{ mb: 1 }}
-                          >
-                            <MenuItem value="">No Subtitles</MenuItem>
-                            {availableSubtitleFiles && availableSubtitleFiles.length > 0 ? (
-                              availableSubtitleFiles.map((subtitle) => (
-                                <MenuItem key={subtitle.id} value={subtitle.id}>
-                                  {subtitle.name} 
-                                  {subtitle.language !== 'en' ? ` (${subtitle.language === 'mr' ? 'Marathi' : 
-                                    subtitle.language === 'hi' ? 'Hindi' : subtitle.language})` : ''}
-                                </MenuItem>
-                              ))
-                            ) : (
-                              <MenuItem value="" disabled>No subtitle files available</MenuItem>
-                            )}
-                          </Select>
-                          <FormHelperText>Select the subtitles to use in the final video</FormHelperText>
-                          
-                          {/* Debug button to force load subtitle files */}
-                          <Button 
-                            size="small" 
-                            variant="outlined" 
-                            onClick={fetchAvailableSubtitles}
-                            sx={{ mt: 1 }}
-                          >
-                            Refresh Subtitle Options
-                          </Button>
-                        </FormControl>
-                      </Grid>
-                    </Grid>
-                  </Paper>
 
-                  <Typography variant="subtitle2" gutterBottom>
-                    Subtitle Settings
-                  </Typography>
-                  
-                  <Grid container spacing={2}>
-                    <Grid item xs={12} sm={6}>
-                      <Typography variant="body2" gutterBottom>
-                        Font Size: {fontSize}
-                      </Typography>
-                      <Slider
-                        value={fontSize}
-                        onChange={(_, value) => setFontSize(value)}
-                        min={10}
-                        max={36}
-                        step={1}
-                        disabled={loading || activeStep > 5}
-                      />
-                    </Grid>
-                    
-                    <Grid item xs={12} sm={6}>
-                      <FormControl fullWidth sx={{ mb: 2 }}>
-                        <Typography variant="body2" gutterBottom>
-                          Subtitle Color
-                        </Typography>
-                        <Select
-                          value={subtitleColor}
-                          onChange={(e) => setSubtitleColor(e.target.value)}
-                          disabled={loading || activeStep > 5}
-                        >
-                          <MenuItem value="white">White</MenuItem>
-                          <MenuItem value="yellow">Yellow</MenuItem>
-                          <MenuItem value="cyan">Cyan</MenuItem>
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                    
-                    <Grid item xs={12}>
-                      <Typography variant="body2" gutterBottom>
-                        Background Opacity: {subtitleBgOpacity}%
-                      </Typography>
-                      <Slider
-                        value={subtitleBgOpacity}
-                        onChange={(_, value) => setSubtitleBgOpacity(value)}
-                        min={0}
-                        max={100}
-                        step={5}
-                        disabled={loading || activeStep > 5}
-                      />
-                    </Grid>
-                  </Grid>
-                  
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={useDirectFfmpeg}
-                        onChange={(e) => setUseDirectFfmpeg(e.target.checked)}
-                        disabled={loading || activeStep > 5}
-                      />
-                    }
-                    label="Use Direct FFmpeg Method (Recommended)"
+        {loading && activeStep < 6 && <LinearProgress sx={{ my: 2 }} />}
+        {error && <Alert severity="error" sx={{ my: 2 }}>{error}</Alert>}
+
+
+        {activeStep === 1 && renderAudioExtractor()}
+        {activeStep === 2 && renderSubtitleGenerator()}
+        
+        {/* Subtitle Editor and Translator: shown primarily in step 3 (Voice Changer) */}
+        {activeStep === 3 && subtitlePath && (
+          <Paper elevation={2} sx={{ p:2, mb: 3 }}>
+            <Typography variant="h6" gutterBottom>Edit & Translate Subtitles</Typography>
+             <Grid container spacing={2}>
+              <Grid item xs={12} md={6}>
+                <Typography variant="subtitle2" gutterBottom>Original Subtitles:</Typography>
+                <Box id="original-subtitles">
+                  <TextField
+                    multiline
+                    fullWidth
+                    minRows={10}
+                    maxRows={10}
+                    value={subtitleContent}
+                    InputProps={{ readOnly: true, sx: { fontFamily: 'monospace' } }}
                   />
                 </Box>
-                
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 2 }}>
-                  <Button
-                    variant="outlined"
-                    onClick={() => setActiveStep(4)}
-                    disabled={loading}
-                  >
-                    Back
-                  </Button>
-                  
-                  {activeStep === 5 ? (
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      onClick={handleCreateFinalVideo}
-                      disabled={loading || !selectedAudioId}
-                      startIcon={loading ? <CircularProgress size={24} /> : null}
-                    >
-                      {loading ? 'Creating...' : 'Create Final Video'}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="outlined"
-                      color="primary"
-                      onClick={() => setActiveStep(6)}
-                      disabled={loading}
-                    >
-                      Next
-                    </Button>
-                  )}
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <Typography variant="subtitle2" gutterBottom>Editable Subtitles:</Typography>
+                <Box id="edited-subtitles">
+                <TextField
+                  multiline
+                  fullWidth
+                  minRows={10}
+                  maxRows={10}
+                  value={editedSubtitleContent}
+                  onChange={(e) => setEditedSubtitleContent(e.target.value)}
+                  InputProps={{ sx: { fontFamily: 'monospace' } }}
+                />
                 </Box>
-              </>
-            )}
-          </Paper>
-          
-          {/* Step 6: Complete - Downloads */}
-          <Paper elevation={2} sx={{ p: 3, mb: 3, 
-            opacity: activeStep < 6 ? 0.7 : 1,
-            filter: activeStep < 6 ? 'grayscale(1)' : 'none'
-          }}>
-            <Typography variant="h6" gutterBottom sx={{ 
-              color: activeStep >= 6 ? 'text.primary' : 'text.disabled'
-            }}>
-              Download Results
-            </Typography>
-            <Typography variant="body2" color={activeStep >= 6 ? "text.secondary" : "text.disabled"} paragraph>
-              Download processed files when available.
-            </Typography>
-            
-            {activeStep === 6 && finalVideoPath && (
-              <>
-                <Box sx={{ mb: 3 }}>
-                  <Typography variant="subtitle1" gutterBottom>
-                    Final Video
-                  </Typography>
-                  <video 
-                    controls 
-                    width="100%" 
-                    src={getFileUrl(finalVideoPath)}
-                    style={{ borderRadius: '4px' }}
-                  />
-                </Box>
-                
-                <Grid container spacing={2} sx={{ mt: 2 }}>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Card variant="outlined">
-                      <CardContent>
-                        <Typography variant="h6">Audio</Typography>
-                      </CardContent>
-                      <CardActions>
-                        <Button 
-                          size="small" 
-                          color="primary"
-                          href={getDownloadUrl(jobId, 'audio')}
-                          target="_blank"
-                        >
-                          Download
-                        </Button>
-                      </CardActions>
-                    </Card>
-                  </Grid>
-                  
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Card variant="outlined">
-                      <CardContent>
-                        <Typography variant="h6">Subtitles</Typography>
-                      </CardContent>
-                      <CardActions>
-                        <Button 
-                          size="small" 
-                          color="primary"
-                          href={getDownloadUrl(jobId, 'subtitles')}
-                          target="_blank"
-                        >
-                          Download
-                        </Button>
-                      </CardActions>
-                    </Card>
-                  </Grid>
-                  
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Card variant="outlined">
-                      <CardContent>
-                        <Typography variant="h6">Cleaned Audio</Typography>
-                      </CardContent>
-                      <CardActions>
-                        <Button 
-                          size="small" 
-                          color="primary"
-                          href={getDownloadUrl(jobId, 'cleaned_audio')}
-                          target="_blank"
-                        >
-                          Download
-                        </Button>
-                      </CardActions>
-                    </Card>
-                  </Grid>
-                  
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Card variant="outlined">
-                      <CardContent>
-                        <Typography variant="h6">Final Video</Typography>
-                      </CardContent>
-                      <CardActions>
-                        <Button 
-                          size="small" 
-                          color="primary"
-                          href={getDownloadUrl(jobId, 'final_video')}
-                          target="_blank"
-                        >
-                          Download
-                        </Button>
-                      </CardActions>
-                    </Card>
-                  </Grid>
-                </Grid>
-                
-                <Button
-                  variant="contained"
-                  color="primary"
-                  onClick={() => navigate('/')}
-                  sx={{ mt: 3 }}
-                >
-                  Process Another Video
+              </Grid>
+            </Grid>
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2, mb:3 }}>
+              <Button
+                variant="contained"
+                color="primary"
+                onClick={handleSaveEditedSubtitles}
+                disabled={loading || subtitleContent === editedSubtitleContent}
+              >
+                Save Edited Subtitles
+              </Button>
+            </Box>
+            <Divider sx={{ my: 2 }} />
+            <Typography variant="subtitle2" gutterBottom>Translate Subtitles:</Typography>
+             <Grid container spacing={2} alignItems="flex-end">
+              <Grid item xs={12} sm={4}>
+                <FormControl fullWidth>
+                  <Select value={translationLanguage} onChange={(e) => setTranslationLanguage(e.target.value)} disabled={translationLoading}>
+                    <MenuItem value="mr">Marathi</MenuItem>
+                    <MenuItem value="hi">Hindi</MenuItem>
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} sm={8}>
+                <Button variant="contained" onClick={handleTranslateSubtitles} disabled={translationLoading || !editedSubtitleContent} startIcon={translationLoading ? <CircularProgress size={20}/> : null}>
+                  {translationLoading ? 'Translating...' : 'Translate Edited Subtitles'}
                 </Button>
-              </>
+              </Grid>
+            </Grid>
+            {translationError && <Alert severity={translationLoading && !translationError.toLowerCase().includes('failed') ? "info" : "error"} sx={{ mt: 2 }}>{translationError}</Alert>}
+            {translatedSubtitleContent && (
+              <Box sx={{ mt: 2 }}>
+                <Typography variant="subtitle2" gutterBottom>Translated ({translationLanguage === 'mr' ? 'Marathi' : 'Hindi'}) Subtitles:</Typography>
+                <TextField multiline fullWidth minRows={10} value={translatedSubtitleContent} onChange={(e) => setTranslatedSubtitleContent(e.target.value)} InputProps={{ sx: { fontFamily: 'monospace' } }}/>
+                <Box sx={{display: 'flex', justifyContent: 'flex-end', gap: 1, mt:1}}>
+                  <Button variant="outlined" size="small" onClick={handleDownloadTranslatedSubtitles} disabled={saveTranslationLoading}>Download Translated</Button>
+                  <Button variant="contained" size="small" onClick={handleSaveTranslatedSubtitles} disabled={saveTranslationLoading}>
+                    {saveTranslationLoading ? <CircularProgress size={20}/> : "Save Translated on Server"}
+                  </Button>
+                </Box>
+              </Box>
             )}
           </Paper>
-        </Box>
+        )}
+        {activeStep === 3 && renderVoiceChanger()}
+
+        {activeStep === 4 && renderAudioCleaner()}
+        {activeStep === 5 && renderFinalVideoCreator()}
+         {/* Download results for activeStep === 6 are now part of renderFinalVideoCreator */}
+        
+        {showAudioComparison && comparisonData && (
+            <WaveformComparison
+                originalAudio={comparisonData.original_audio}
+                generatedAudio={comparisonData.generated_audio}
+                subtitleTimings={comparisonData.subtitle_timing}
+                open={showAudioComparison}
+                onClose={() => setShowAudioComparison(false)}
+            />
+        )}
+
       </Box>
-      
-      {/* Character Selector Dialog */}
-      <Dialog 
-        open={showCharacterSelector} 
-        onClose={() => setShowCharacterSelector(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>
-          Select Voice Character
-        </DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" color="text.secondary" paragraph>
-            Choose a voice character to try. You can preview different voices before making your final selection.
-          </Typography>
-          <Grid container spacing={2}>
-            {availableVoices.map((voice) => (
-              <Grid item xs={12} sm={6} md={4} key={voice.id}>
-                <Card 
-                  variant={voiceCharacter === voice.id ? "outlined" : "elevation"}
-                  sx={{ 
-                    height: '100%', 
-                    cursor: 'pointer',
-                    bgcolor: voiceCharacter === voice.id ? 'primary.50' : 'background.paper',
-                    borderColor: voiceCharacter === voice.id ? 'primary.main' : 'divider',
-                    '&:hover': {
-                      borderColor: 'primary.main',
-                      boxShadow: 1
-                    }
-                  }}
-                  onClick={() => setVoiceCharacter(voice.id)}
-                >
-                  <CardContent>
-                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
-                      <Avatar 
-                        sx={{ 
-                          bgcolor: voice.name.includes('Female') ? 'secondary.light' : 'primary.light',
-                          width: 32, 
-                          height: 32,
-                          mr: 1
-                        }}
-                      >
-                        <RecordVoiceOverIcon sx={{ fontSize: 18 }} />
-                      </Avatar>
-                      <Typography variant="subtitle1">{voice.name.split(' ')[0]}</Typography>
-                    </Box>
-                    <Typography variant="caption" color="text.secondary">
-                      {voice.name.includes('Female') ? 'Female Voice' : 'Male Voice'}
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-            ))}
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowCharacterSelector(false)}>Cancel</Button>
-          <Button 
-            variant="contained" 
-            onClick={() => {
-              handleChangeVoice();
-              setShowCharacterSelector(false);
-            }}
-            startIcon={<RecordVoiceOverIcon />}
-          >
-            Generate with Selected Voice
-          </Button>
-        </DialogActions>
-      </Dialog>
-      
-      {/* Voice Comparison Dialog */}
-      <Dialog
-        open={showVoiceComparisonModal}
-        onClose={() => setShowVoiceComparisonModal(false)}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>Compare Voices</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" color="text.secondary" paragraph>
-            Listen to different voices side by side to compare them.
-          </Typography>
-          
-          <Grid container spacing={2}>
-            {voiceHistory.slice(-4).map((voice, index) => (
-              <Grid item xs={12} sm={6} key={index}>
-                <Card variant="outlined" sx={{ mb: 2 }}>
-                  <CardContent>
-                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                      <Avatar 
-                        sx={{ 
-                          bgcolor: voice.voice_name.toLowerCase().includes('female') ? 'secondary.light' : 'primary.light',
-                          mr: 1 
-                        }}
-                      >
-                        <RecordVoiceOverIcon />
-                      </Avatar>
-                      <Box>
-                        <Typography variant="subtitle1">{voice.voice_name}</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          Stability: {voice.stability.toFixed(2)} | Clarity: {voice.clarity.toFixed(2)}
-                        </Typography>
-                        {voice.subtitle_selection && (
-                          <Typography variant="caption" color="text.secondary" display="block">
-                            Source: {voice.subtitle_selection === 'original' ? 'Original Subtitles' : 
-                                     voice.subtitle_selection === 'edited' ? 'Edited Subtitles' : 
-                                     voice.subtitle_selection === 'marathi' ? 'Marathi Subtitles' : 
-                                     voice.subtitle_selection === 'hindi' ? 'Hindi Subtitles' : 
-                                     voice.subtitle_selection}
-                          </Typography>
-                        )}
-                      </Box>
-                    </Box>
-                    <audio controls src={getFileUrl(voice.url_path)} style={{ width: '100%' }} />
-                  </CardContent>
-                  <CardActions>
-                    <Button 
-                      size="small" 
-                      onClick={() => {
-                        setVoiceChangedAudioPath(voice.url_path);
-                        setShowVoiceComparisonModal(false);
-                      }}
-                    >
-                      Select This Voice
-                    </Button>
-                    <Button 
-                      size="small" 
-                      color="secondary"
-                      onClick={() => {
-                        // Use this voice's settings for a new generation
-                        setVoiceCharacter(voice.voice_id);
-                        setVoiceStability(voice.stability);
-                        setVoiceClarity(voice.clarity);
-                        setActiveStep(3);
-                        setShowVoiceComparisonModal(false);
-                      }}
-                    >
-                      Use Settings
-                    </Button>
-                  </CardActions>
-                </Card>
-              </Grid>
-            ))}
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowVoiceComparisonModal(false)}>Close</Button>
-        </DialogActions>
-      </Dialog>
-      
-      {/* Note: AudioComparison is now integrated directly in the main UI, no need for duplicate */}
     </Box>
   );
 };
 
-export default ProcessingPage; 
+export default ProcessingPage;

@@ -15,6 +15,19 @@ from dotenv import load_dotenv
 import requests
 import re
 import sys
+from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from audio_cleaner import AudioCleaner
+from subtitle_generator import SubtitleGenerator
+import traceback
+import json
+from datetime import datetime
+from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
+from database import engine, get_db
+from models import Job, JobStep, Subtitle, AudioFile
+from config import UPLOAD_DIR, OUTPUT_DIR
 
 # Load environment variables from .env file
 load_dotenv()
@@ -63,9 +76,6 @@ def extract_text_from_srt(srt_content):
         print(f"Error extracting text from subtitles: {str(e)}")
         return "Error extracting subtitles. Please check the subtitle format."
 
-# Import the VideoProcessor class from our existing code
-from video_processor import VideoProcessor
-
 app = FastAPI(title="Video Processing API", 
               description="API for processing videos with transcription, audio cleaning, and subtitle generation")
 
@@ -78,19 +88,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create directories for storing uploads and processed files
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "outputs"))
-UPLOAD_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# Dictionary to store jobs and their status
-processing_jobs = {}
-
-# Mount the outputs directory to serve files
+# Mount the outputs directory for static file serving
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-# Mount the uploads directory as well (useful for debugging)
-app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+# --- Removed redundant directory creation ---
 
 @app.get("/")
 async def read_root():
@@ -99,169 +100,246 @@ async def read_root():
 @app.post("/upload-video/")
 async def upload_video(
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
 ):
-    """Upload a video file to process"""
-    # Generate a unique ID for this job
-    job_id = str(int(time.time()))
-    
-    # Create job-specific directories
-    job_upload_dir = UPLOAD_DIR / job_id
-    job_output_dir = OUTPUT_DIR / job_id
-    job_upload_dir.mkdir(exist_ok=True)
-    job_output_dir.mkdir(exist_ok=True)
-    
-    # Save the uploaded file
-    file_path = job_upload_dir / file.filename
-    async with aiofiles.open(file_path, 'wb') as out_file:
-        content = await file.read()
-        await out_file.write(content)
-    
-    # Register job in the processing jobs dictionary
-    processing_jobs[job_id] = {
-        "id": job_id,
-        "filename": file.filename,
-        "status": "uploaded",
-        "upload_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "video_path": str(file_path),
-        "output_dir": str(job_output_dir),
-        "steps": {
-            "extract_audio": {"status": "pending", "path": None},
-            "generate_subtitles": {"status": "pending", "path": None},
-            "clean_audio": {"status": "pending", "path": None},
-            "create_final_video": {"status": "pending", "path": None}
+    """Upload a video file to process (DB version)"""
+    try:
+        print(f"Received upload request for file: {file.filename}")
+        
+        # Validate file type
+        if not file.content_type.startswith('video/'):
+            raise HTTPException(status_code=400, detail="File must be a video")
+
+        # Create a temporary directory for upload (will rename after job creation)
+        temp_upload_dir = tempfile.mkdtemp(dir=UPLOAD_DIR)
+        temp_output_dir = tempfile.mkdtemp(dir=OUTPUT_DIR)
+
+        # Save the uploaded file
+        file_path = Path(temp_upload_dir) / file.filename
+        try:
+            async with aiofiles.open(file_path, 'wb') as out_file:
+                content = await file.read()
+                await out_file.write(content)
+        except Exception as e:
+            print(f"Error saving file: {str(e)}")
+            raise HTTPException(status_code=500, detail="Failed to save uploaded file")
+
+        # Create Job in DB (let DB generate UUID)
+        try:
+            job = Job(
+                filename=file.filename,
+                status="uploaded",
+                upload_time=datetime.utcnow(),
+                video_path=str(file_path),
+                output_dir=str(temp_output_dir),
+                current_step="upload"
+            )
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+        except Exception as e:
+            print(f"Error creating job in database: {str(e)}")
+            # Clean up temp directories
+            shutil.rmtree(temp_upload_dir, ignore_errors=True)
+            shutil.rmtree(temp_output_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail="Failed to create job in database")
+
+        # Now rename the temp dirs to use the real job.id (UUID)
+        try:
+            job_upload_dir = UPLOAD_DIR / str(job.id)
+            job_output_dir = OUTPUT_DIR / str(job.id)
+            os.rename(temp_upload_dir, job_upload_dir)
+            os.rename(temp_output_dir, job_output_dir)
+            # Update job paths in DB
+            job.video_path = str(job_upload_dir / file.filename)
+            job.output_dir = str(job_output_dir)
+            db.commit()
+        except Exception as e:
+            print(f"Error renaming directories: {str(e)}")
+            # Try to clean up
+            shutil.rmtree(temp_upload_dir, ignore_errors=True)
+            shutil.rmtree(temp_output_dir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail="Failed to set up job directories")
+
+        # Add initial steps
+        try:
+            for step_name in ["extract_audio", "generate_subtitles", "clean_audio", "create_final_video"]:
+                step = JobStep(
+                    job_id=job.id,
+                    step_name=step_name,
+                    status="pending",
+                    file_path=None
+                )
+                db.add(step)
+            db.commit()
+        except Exception as e:
+            print(f"Error creating job steps: {str(e)}")
+            # Don't raise here, as the job is already created
+            # Just log the error and continue
+
+        return {
+            "job_id": str(job.id),
+            "status": "uploaded",
+            "message": "Video uploaded successfully"
         }
-    }
-    
-    return {"job_id": job_id, "status": "uploaded", "message": "Video uploaded successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected error in upload_video: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 @app.post("/extract-audio/{job_id}")
-async def extract_audio(job_id: str):
-    """Extract audio from the uploaded video"""
-    if job_id not in processing_jobs:
+async def extract_audio(job_id: str, db: Session = Depends(get_db)):
+    """Extract audio from the uploaded video (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
     try:
-        video_path = job["video_path"]
-        output_dir = job["output_dir"]
-        
-        # Initialize VideoProcessor
-        processor = VideoProcessor(video_path, debug_mode=True)
-        
-        # Extract audio
-        audio_path = processor.extract_audio()
-        
-        # Copy the audio file to the job output directory
+        video_path = job.video_path
+        output_dir = job.output_dir
+
+        # Use ffmpeg directly for audio extraction
+        import subprocess
         output_filename = f"audio_{job_id}.wav"
         output_path = os.path.join(output_dir, output_filename)
-        shutil.copy2(audio_path, output_path)
-        
-        # Update job status
-        job["steps"]["extract_audio"]["status"] = "completed"
-        job["steps"]["extract_audio"]["path"] = output_path
-        job["status"] = "audio_extracted"
-        
+        command = [
+            "ffmpeg", "-y", "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2", output_path
+        ]
+        subprocess.run(command, check=True)
+
+        # Update job step in DB
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "extract_audio").first()
+        if step:
+            step.status = "completed"
+            step.file_path = output_path
+        job.status = "audio_extracted"
+        db.commit()
+
+        # Add the extracted audio to the AudioFile table
+        audio_file = AudioFile(
+            job_id=job.id,
+            type="original",
+            file_path=output_path,
+            label="Extracted Audio",
+            created_at=datetime.utcnow()
+        )
+        db.add(audio_file)
+        db.commit()
+
         return {
-            "job_id": job_id, 
-            "status": "audio_extracted", 
+            "job_id": str(job.id),
+            "status": "audio_extracted",
             "audio_path": f"/outputs/{job_id}/{output_filename}"
         }
-        
     except Exception as e:
-        job["steps"]["extract_audio"]["status"] = "failed"
-        job["steps"]["extract_audio"]["error"] = str(e)
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "extract_audio").first()
+        if step:
+            step.status = "failed"
+            step.file_path = None
+        job.status = "extract_audio_failed"
+        db.commit()
         return JSONResponse(
             status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
+            content={"job_id": str(job.id), "status": "failed", "error": str(e)}
         )
 
-# Background task to generate subtitles
-def _run_subtitle_generation(job_id: str, transcription_method: str, language: str, whisper_model_size: str, assemblyai_api_key: str = None):
-    """Run subtitle generation in background"""
+# --- New DB-driven background subtitle generation function ---
+def run_subtitle_generation_db(job_id: str, transcription_method: str, language: str, whisper_model_size: str):
+    """Run subtitle generation in background using DB session"""
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
     try:
-        job = processing_jobs[job_id]
-        video_path = job["video_path"]
-        output_dir = job["output_dir"]
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            print(f"Job {job_id} not found in background task.")
+            return
         
-        # Initialize VideoProcessor with appropriate settings
-        use_assemblyai = transcription_method == "assemblyai"
-        processor = VideoProcessor(
-            video_path,
-            whisper_model_size=whisper_model_size,
-            use_assemblyai=use_assemblyai,
-            assemblyai_api_key=assemblyai_api_key,
-            debug_mode=True,
-            language=language
-        )
+        video_path = job.video_path
+        output_dir = job.output_dir
         
-        # Generate subtitles
-        subtitle_path = processor.generate_subtitles()
-        
-        # Copy the subtitle file to the job output directory
-        output_filename = f"subtitles_{job_id}.srt"
-        output_path = os.path.join(output_dir, output_filename)
-        shutil.copy2(subtitle_path, output_path)
-        
-        # Read the subtitle content for verification
-        try:
-            with open(output_path, 'r', encoding='utf-8') as f:
-                subtitle_content = f.read()
-                content_length = len(subtitle_content)
-                print(f"Generated subtitle content length: {content_length} bytes")
-        except Exception as read_error:
-            print(f"Error reading generated subtitles: {read_error}")
-        
-        # Update job status
-        job["steps"]["generate_subtitles"]["status"] = "completed"
-        job["steps"]["generate_subtitles"]["path"] = output_path
-        job["status"] = "subtitles_generated"
-        
-    except Exception as e:
-        print(f"Error in background subtitle generation: {e}")
-        print(traceback.format_exc())
-        if job_id in processing_jobs:
-            job = processing_jobs[job_id]
-            job["steps"]["generate_subtitles"]["status"] = "failed"
-            job["steps"]["generate_subtitles"]["error"] = str(e)
-            job["status"] = "subtitle_generation_failed"
+        audio_path = os.path.join(output_dir, f"audio_{job_id}.wav")
+        if not os.path.exists(audio_path):
+            print(f"Audio file {audio_path} not found for job {job_id} in background task.")
+            # Potentially update job status to reflect this specific error
+            step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+            if step:
+                step.status = "failed"
+                step.details = "Prerequisite audio file not found." # You might want to add a 'details' column to JobStep
+            job.status = "generate_subtitles_failed"
+            db.commit()
+            return
 
-# Function to handle Marathi subtitle generation in background
-async def _generate_subtitles_background(
-    job_id: str,
-    transcription_method: str,
-    language: str,
-    whisper_model_size: str,
-    assemblyai_api_key: str = None,
-    background_tasks: BackgroundTasks = None
-):
-    """Generate Marathi subtitles in the background to prevent timeout"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+        subtitles_path = os.path.join(output_dir, f"subtitles_{job_id}.srt")
         
-    job = processing_jobs[job_id]
-    
-    # Initially update job status to in-progress
-    job["steps"]["generate_subtitles"]["status"] = "in_progress"
-    job["status"] = "generating_subtitles"
-    
-    # Add the background task
-    if background_tasks:
-        background_tasks.add_task(
-            _run_subtitle_generation,
-            job_id=job_id,
-            transcription_method=transcription_method,
+        print(f"Background task: Starting subtitle generation for job {job_id} using {transcription_method}...")
+        generator = SubtitleGenerator(
+            audio_path=audio_path,
+            video_path=video_path, # video_path might not be strictly needed by SubtitleGenerator if audio is already there
+            output_dir=output_dir,
+            subtitles_path=subtitles_path,
             language=language,
             whisper_model_size=whisper_model_size,
-            assemblyai_api_key=assemblyai_api_key
+            debug_mode=True # Set to False in production or based on env variable
         )
-    
-    # Return immediately with a status message
-    return {
-        "job_id": job_id, 
-        "status": "generating_subtitles", 
-        "message": "Marathi subtitle generation started. This may take several minutes. Check job status for updates."
-    }
+        
+        generated_subtitle_file_path = generator.generate_subtitles()
+        
+        output_filename = os.path.basename(generated_subtitle_file_path) # f"subtitles_{job_id}.srt"
+        # It's safer to use the filename from the generator, but ensure it follows a consistent pattern if not self.subtitles_path
+        # If generator.generate_subtitles() always returns self.subtitles_path, then:
+        # output_filename = f"subtitles_{job_id}.srt" 
+        # And the copy line below would use `generated_subtitle_file_path` as source and `subtitles_path` as dest,
+        # or if `generated_subtitle_file_path` *is* `subtitles_path`, no copy is needed unless you want to rename.
+
+        # Ensure the file was actually created and is not just the fallback
+        if os.path.exists(generated_subtitle_file_path) and os.path.getsize(generated_subtitle_file_path) > 0:
+            # If generated_subtitle_file_path is different from subtitles_path, copy it.
+            # If it's the same, this shutil.copy2 might be redundant but harmless if src and dst are identical.
+            # However, SubtitleGenerator is already writing to `self.subtitles_path`, so `generated_subtitle_file_path` should be `subtitles_path`.
+            # shutil.copy2(generated_subtitle_file_path, subtitles_path) # This line might be redundant if generator writes directly to subtitles_path
+            
+            # Update job step in DB
+            step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+            if step:
+                step.status = "completed"
+                step.file_path = subtitles_path # Store the path
+            
+            # Add subtitle record
+            subtitle_record = Subtitle(job_id=job.id, type="original", file_path=subtitles_path)
+            db.add(subtitle_record)
+            job.status = "subtitles_generated"
+            print(f"Background task: Subtitle generation completed successfully for job {job_id}.")
+        else:
+            print(f"Background task: Subtitle generation failed or produced empty file for job {job_id}. Path: {generated_subtitle_file_path}")
+            step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+            if step:
+                step.status = "failed"
+            job.status = "generate_subtitles_failed"
+            # Basic subtitles might have been created by _create_basic_subtitles
+            # Decide if you want to record this path or not.
+            # If basic subtitles were created at `subtitles_path`, you might still want to record it but with a different status.
+            if os.path.exists(subtitles_path):
+                 # Optionally add basic subtitle record if it exists
+                basic_subtitle_record = Subtitle(job_id=job.id, type="fallback_basic", file_path=subtitles_path)
+                db.add(basic_subtitle_record)
+
+
+        db.commit()
+    except Exception as e:
+        print(f"Error in background subtitle generation for job {job_id}: {e}")
+        print(traceback.format_exc())
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+        if step:
+            step.status = "failed"
+            # step.details = str(e) # Consider adding details
+        if job: # Ensure job is not None
+            job.status = "generate_subtitles_failed"
+        db.commit()
+    finally:
+        db.close()
+
 
 @app.post("/generate-subtitles/{job_id}")
 async def generate_subtitles(
@@ -269,1080 +347,543 @@ async def generate_subtitles(
     transcription_method: str = Form("whisper"),
     language: str = Form("en"),
     whisper_model_size: str = Form("base"),
-    assemblyai_api_key: str = Form(None),
+    assemblyai_api_key: str = Form(None), # Stays as a Form param, but not used by run_subtitle_generation_db
     background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db)
 ):
-    """Generate subtitles for the video"""
-    # For Marathi subtitles, we need to increase the server-side timeout
-    # by handling this in a background task for longer-running operations
-    if language == "mr" and background_tasks is not None:
-        return await _generate_subtitles_background(
-            job_id=job_id,
-            transcription_method=transcription_method,
+    """Generate subtitles for the video (DB version, supports background task)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    audio_path = os.path.join(job.output_dir, f"audio_{job_id}.wav")
+    if not os.path.exists(audio_path):
+        job.status = "generate_subtitles_failed"
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+        if step:
+            step.status = "failed"
+            # step.details = "Prerequisite audio file not found."
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Extracted audio not found for job {job_id}. Please extract audio first.")
+
+    if background_tasks:
+        # Mark step as in progress
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+        if step:
+            step.status = "in_progress"
+        job.status = "generating_subtitles"
+        db.commit()
+        
+        # Call the background task without assemblyai_api_key
+        background_tasks.add_task(
+            run_subtitle_generation_db,
+            job_id,
+            transcription_method,
+            language,
+            whisper_model_size
+        )
+        return {
+            "job_id": str(job.id),
+            "status": "generating_subtitles",
+            "message": "Subtitle generation started in background. This may take several minutes. Check job status for updates."
+        }
+    
+    # Synchronous execution (if not using background_tasks)
+    try:
+        video_path = job.video_path # This might not be strictly needed if audio_path is used
+        output_dir = job.output_dir
+        
+        subtitles_path = os.path.join(output_dir, f"subtitles_{job_id}.srt")
+        
+        generator = SubtitleGenerator(
+            audio_path=audio_path,
+            video_path=video_path,
+            output_dir=output_dir,
+            subtitles_path=subtitles_path,
             language=language,
             whisper_model_size=whisper_model_size,
-            assemblyai_api_key=assemblyai_api_key,
-            background_tasks=background_tasks
-        )
-    
-    # For non-Marathi languages, continue with normal processing
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    try:
-        video_path = job["video_path"]
-        output_dir = job["output_dir"]
-        
-        # Initialize VideoProcessor with appropriate settings
-        use_assemblyai = transcription_method == "assemblyai"
-        processor = VideoProcessor(
-            video_path,
-            whisper_model_size=whisper_model_size,
-            use_assemblyai=use_assemblyai,
-            assemblyai_api_key=assemblyai_api_key,
-            debug_mode=True,
-            language=language
+            debug_mode=True 
         )
         
-        # Generate subtitles
-        subtitle_path = processor.generate_subtitles()
+        generated_subtitle_file_path = generator.generate_subtitles()
+        output_filename = os.path.basename(generated_subtitle_file_path)
+
+        if not os.path.exists(generated_subtitle_file_path) or os.path.getsize(generated_subtitle_file_path) == 0 :
+            # Check if basic subtitles were created due to failure
+            if os.path.exists(subtitles_path) and "Error generating" in open(subtitles_path, 'r', encoding='utf-8').read(100):
+                 # If basic fallback exists, treat it as such
+                print(f"Subtitle generation resulted in fallback for job {job_id}.")
+                job.status = "subtitles_fallback"
+                subtitle_content = open(subtitles_path, 'r', encoding='utf-8').read()
+            else:
+                raise Exception("Subtitle generation failed or produced an empty file.")
+        else:
+            with open(generated_subtitle_file_path, 'r', encoding='utf-8') as f:
+                subtitle_content = f.read()
+            job.status = "subtitles_generated"
         
-        # Copy the subtitle file to the job output directory
-        output_filename = f"subtitles_{job_id}.srt"
-        output_path = os.path.join(output_dir, output_filename)
-        shutil.copy2(subtitle_path, output_path)
+        # Update job step in DB
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+        if step:
+            step.status = "completed" if job.status == "subtitles_generated" else "failed" # Or "completed_with_fallback"
+            step.file_path = generated_subtitle_file_path if os.path.exists(generated_subtitle_file_path) else subtitles_path
         
-        # Read the subtitle content
-        with open(output_path, 'r', encoding='utf-8') as f:
-            subtitle_content = f.read()
+        # Add subtitle record
+        subtitle_record = Subtitle(job_id=job.id, type="original", file_path=generated_subtitle_file_path if os.path.exists(generated_subtitle_file_path) else subtitles_path)
+        db.add(subtitle_record)
         
-        # Update job status
-        job["steps"]["generate_subtitles"]["status"] = "completed"
-        job["steps"]["generate_subtitles"]["path"] = output_path
-        job["status"] = "subtitles_generated"
+        db.commit()
         
         return {
-            "job_id": job_id, 
-            "status": "subtitles_generated", 
+            "job_id": str(job.id),
+            "status": job.status,
             "subtitle_path": f"/outputs/{job_id}/{output_filename}",
             "subtitle_content": subtitle_content
         }
-        
     except Exception as e:
-        job["steps"]["generate_subtitles"]["status"] = "failed"
-        job["steps"]["generate_subtitles"]["error"] = str(e)
+        print(f"Error in synchronous subtitle generation for job {job_id}: {e}")
+        traceback.print_exc()
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+        if step:
+            step.status = "failed"
+            step.file_path = None
+        job.status = "generate_subtitles_failed"
+        db.commit()
         return JSONResponse(
             status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
+            content={"job_id": str(job.id), "status": "failed", "error": str(e)}
         )
 
 @app.post("/save-edited-subtitles/{job_id}")
 async def save_edited_subtitles(
     job_id: str,
-    subtitle_content: str = Form(...)
+    subtitle_content: str = Form(...),
+    db: Session = Depends(get_db)
 ):
-    """Save edited subtitle content to a file"""
-    if job_id not in processing_jobs:
+    """Save edited subtitle content to a file (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
     try:
-        output_dir = job["output_dir"]
-        
-        # Save edited subtitle content to a new file
-        output_filename = f"edited_subtitles_{job_id}.srt"
+        output_dir = job.output_dir
+        # Use a consistent naming or base it on the job ID to avoid overwriting
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        output_filename = f"subtitles_{job_id}_edited_{timestamp}.srt"
         output_path = os.path.join(output_dir, output_filename)
+        
+        Path(output_dir).mkdir(parents=True, exist_ok=True) # Ensure output dir exists
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(subtitle_content)
         
-        # Update job with edited subtitle path
-        job["edited_subtitle_path"] = output_path
+        # Add subtitle record
+        subtitle = Subtitle(job_id=job.id, type="edited", file_path=output_path, created_at=datetime.utcnow())
+        db.add(subtitle)
+        
+        job.status = "subtitles_edited" # Or maintain the previous relevant status
+        db.commit()
         
         return {
-            "job_id": job_id, 
-            "status": "subtitles_edited", 
+            "job_id": str(job.id),
+            "status": "subtitles_edited",
             "edited_subtitle_path": f"/outputs/{job_id}/{output_filename}"
         }
-        
     except Exception as e:
+        print(f"Error saving edited subtitles for job {job_id}: {e}")
+        traceback.print_exc()
         return JSONResponse(
             status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
-        )
-
-@app.post("/change-voice/{job_id}")
-async def change_voice(
-    job_id: str,
-    voice_id: str = Form("21m00Tcm4TlvDq8ikWAM"),  # Default voice ID (Rachel)
-    stability: float = Form(0.5),
-    clarity: float = Form(0.75),
-    voice_name: str = Form(None),  # Optional voice name for history
-    custom_text: str = Form(None),  # Optional custom text to override subtitle text
-    max_chunk_size: int = Form(400),  # Maximum chunk size to stay within credit limits
-    subtitle_selection: str = Form("original"),  # 'original', 'edited', 'marathi', 'hindi'
-    compare_with_original: bool = Form(False)  # Whether to generate a comparison view
-):
-    """Change voice using ElevenLabs API based on subtitles or custom text"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    try:
-        output_dir = job["output_dir"]
-        
-        # Import VoiceChanger module
-        from voice_changer import VoiceChanger
-        
-        # Initialize VoiceChanger (will use API key from .env file)
-        voice_changer = VoiceChanger()
-        
-        # Create a timestamp for uniqueness
-        timestamp = int(time.time())
-        
-        # Set output filename (include voice ID for reference)
-        voice_id_short = voice_id[:8] if len(voice_id) > 8 else voice_id
-        output_filename = f"voice_{voice_id_short}_{timestamp}_{job_id}.mp3"
-        output_path = os.path.join(output_dir, output_filename)
-        
-        # Determine the text to use for voice generation
-        script_text = ""
-        if custom_text:
-            # Use the provided custom text directly
-            script_text = custom_text
-            print(f"Using custom text for voice generation ({len(script_text)} characters)")
-        else:
-            # Determine which subtitle file to use based on subtitle_selection
-            subtitle_path = None
-            
-            print(f"Subtitle selection requested: {subtitle_selection}")
-            print(f"Available job keys: {job.keys()}")
-            
-            if subtitle_selection == "edited" and "edited_subtitle_path" in job:
-                subtitle_path = job["edited_subtitle_path"]
-                print(f"Using edited subtitle file: {subtitle_path}")
-            elif subtitle_selection == "marathi" and "translated_subtitle_path_mr" in job:
-                subtitle_path = job["translated_subtitle_path_mr"]
-                print(f"Using Marathi subtitle file: {subtitle_path}")
-            elif subtitle_selection == "hindi" and "translated_subtitle_path_hi" in job:
-                subtitle_path = job["translated_subtitle_path_hi"]
-                print(f"Using Hindi subtitle file: {subtitle_path}")
-            else:
-                # Default to original subtitles
-                subtitle_path = job["steps"]["generate_subtitles"]["path"]
-                print(f"Using original subtitle file: {subtitle_path}")
-            
-            if not subtitle_path or not os.path.exists(subtitle_path):
-                raise HTTPException(status_code=400, detail=f"Selected subtitle file ({subtitle_selection}) not found")
-                
-            # Extract subtitle content
-            with open(subtitle_path, 'r', encoding='utf-8') as f:
-                subtitle_content = f.read()
-                
-            # Extract plain text script from subtitles
-            script_text = extract_text_from_srt(subtitle_content)
-            
-            if not script_text:
-                raise HTTPException(status_code=500, detail="Failed to extract text from subtitles")
-                
-            print(f"Extracted script text from subtitles ({len(script_text)} characters)")
-        
-        # Generate audio from script using voice changer
-        try:
-            # First, check if the ElevenLabs API key is available
-            if not voice_changer.api_key:
-                raise ValueError("ElevenLabs API key is not set or is invalid")
-                
-            # Check available credits
-            subscription_data = voice_changer.check_user_credits()
-            if subscription_data:
-                character_limit = subscription_data.get('character_limit', 0)
-                characters_used = subscription_data.get('character_count', 0)
-                available_credits = character_limit - characters_used
-            else:
-                available_credits = 0
-            required_credits = len(script_text)
-            
-            print(f"Available credits: {available_credits}, Required: {required_credits}")
-            
-            # If text is too long for available credits, use chunking
-            if required_credits > available_credits or required_credits > max_chunk_size:
-                print(f"Text too long for available credits. Using chunking approach.")
-                
-                # Create a temporary directory for the chunks
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    # Split the text into smaller chunks that fit within credit limits and max_chunk_size
-                    chunk_size = min(available_credits - 50, max_chunk_size)  # Leave some buffer
-                    if chunk_size < 100:
-                        # Not enough credits - return early with skip message
-                        return await skip_voice_change(
-                            job_id,
-                            error_message=f"Not enough credits available. Available: {available_credits}, minimum needed: 100"
-                        )
-                    
-                    # Split by sentences to keep coherent chunks
-                    import re
-                    sentences = re.split(r'(?<=[.!?])\s+', script_text)
-                    chunks = []
-                    current_chunk = ""
-                    
-                    for sentence in sentences:
-                        if len(current_chunk) + len(sentence) <= chunk_size:
-                            current_chunk += sentence + " "
-                        else:
-                            if current_chunk:
-                                chunks.append(current_chunk.strip())
-                            current_chunk = sentence + " "
-                    
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                    
-                    print(f"Split text into {len(chunks)} chunks")
-                    
-                    # Process each chunk
-                    chunk_files = []
-                    for i, chunk in enumerate(chunks):
-                        chunk_output = os.path.join(temp_dir, f"chunk_{i}.mp3")
-                        print(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
-                        
-                        success = voice_changer.generate_voice_from_text(
-                            text=chunk,
-                            voice_id=voice_id,
-                            output_filename=chunk_output,
-                            stability=stability,
-                            similarity_boost=clarity
-                        )
-                        
-                        if not success:
-                            raise ValueError(f"Failed to generate voice for chunk {i+1}")
-                        
-                        chunk_files.append(chunk_output)
-                    
-                    # Combine all audio chunks
-                    from pydub import AudioSegment
-                    combined = AudioSegment.empty()
-                    for chunk_file in chunk_files:
-                        audio_segment = AudioSegment.from_mp3(chunk_file)
-                        combined += audio_segment
-                    
-                    combined.export(output_path, format="mp3")
-                    print(f"Combined {len(chunks)} audio chunks into {output_path}")
-            else:
-                # Use the appropriate method based on input type
-                if subtitle_path and not custom_text:
-                    print("Using timing-preserved TTS generation for subtitle file")
-                    # Check if the subtitle file actually has timing info
-                    with open(subtitle_path, 'r', encoding='utf-8') as f:
-                        subtitle_content = f.read()
-                        has_timing = '-->' in subtitle_content
-                    
-                    if has_timing:
-                        # Use improved timing-preserved method
-                        success = voice_changer.generate_voice_with_timing(
-                            subtitle_path=subtitle_path,
-                            voice_id=voice_id,
-                            output_filename=output_path,
-                            stability=stability,
-                            similarity_boost=clarity
-                        )
-                    else:
-                        # No timing info found, use regular approach
-                        print("No timing info found in subtitle file, using standard TTS")
-                        success = voice_changer.generate_voice_from_text(
-                            text=script_text,
-                            voice_id=voice_id,
-                            output_filename=output_path,
-                            stability=stability,
-                            similarity_boost=clarity
-                        )
-                else:
-                    # Process the entire text at once if using custom text
-                    print("Using standard TTS for custom text")
-                    success = voice_changer.generate_voice_from_text(
-                        text=script_text,
-                        voice_id=voice_id,
-                        output_filename=output_path,
-                        stability=stability,
-                        similarity_boost=clarity
-                    )
-                
-                if not success:
-                    return await skip_voice_change(job_id, error_message="Failed to generate voice audio from subtitles")
-        except ValueError as ve:
-            print(f"Error in voice generation: {str(ve)}")
-            return await skip_voice_change(job_id, error_message=f"Voice generation error: {str(ve)}")
-        except Exception as e:
-            print(f"Error in voice generation: {str(e)}")
-            return await skip_voice_change(job_id, error_message=f"Voice generation error: {str(e)}")
-        
-        # Initialize voice history if it doesn't exist
-        if "voice_history" not in job:
-            job["voice_history"] = []
-            
-        # Add current voice to history with metadata
-        voice_entry = {
-            "voice_id": voice_id,
-            "voice_name": voice_name or f"Voice {len(job['voice_history']) + 1}",
-            "timestamp": timestamp,
-            "path": output_path,
-            "url_path": f"/outputs/{job_id}/{output_filename}",
-            "stability": stability,
-            "clarity": clarity
-        }
-        
-        # Add to history
-        job["voice_history"].append(voice_entry)
-        
-        # Update job status
-        if "steps" not in job:
-            job["steps"] = {}
-        
-        if "change_voice" not in job["steps"]:
-            job["steps"]["change_voice"] = {}
-        
-        job["steps"]["change_voice"]["status"] = "completed"
-        job["steps"]["change_voice"]["path"] = output_path
-        job["status"] = "voice_changed"
-        
-        # If comparison is requested, prepare additional data
-        comparison_data = None
-        if compare_with_original:
-            # Get original audio path
-            original_audio_path = None
-            if "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
-                original_audio_path = job["steps"]["extract_audio"]["path"]
-            
-            if original_audio_path and os.path.exists(original_audio_path):
-                print(f"Creating comparison data between original audio and generated voice")
-                # Add original audio info to the response
-                comparison_data = {
-                    "original_audio_path": f"/outputs/{job_id}/audio_{job_id}.wav",
-                    "generated_audio_path": f"/outputs/{job_id}/{output_filename}",
-                    "original_duration": get_audio_duration(original_audio_path),
-                    "generated_duration": get_audio_duration(output_path),
-                }
-        
-        return {
-            "job_id": job_id, 
-            "status": "voice_changed", 
-            "voice_changed_audio_path": f"/outputs/{job_id}/{output_filename}",
-            "voice_history": job["voice_history"],
-            "comparison_data": comparison_data
-        }
-        
-    except Exception as e:
-        import traceback
-        print(f"Voice change error: {str(e)}")
-        print(traceback.format_exc())
-        
-        # Make sure we have change_voice in steps
-        if "steps" in job and "change_voice" not in job["steps"]:
-            job["steps"]["change_voice"] = {}
-            
-        # Update error status
-        if "steps" in job and "change_voice" in job["steps"]:
-            job["steps"]["change_voice"]["status"] = "failed"
-            job["steps"]["change_voice"]["error"] = str(e)
-            
-        return JSONResponse(
-            status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
-        )
-
-# Helper function to get audio duration
-def get_audio_duration(audio_path):
-    """Get duration of audio file in seconds"""
-    try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(audio_path)
-        return len(audio) / 1000.0  # Convert from ms to seconds
-    except Exception as e:
-        print(f"Error getting audio duration: {e}")
-        return None
-
-@app.get("/compare-audio/{job_id}/{voice_index}")
-async def compare_audio(job_id: str, voice_index: int = 0):
-    """Get comparison data for original audio and generated voice"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    
-    # Get original audio path
-    original_audio_path = None
-    if "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
-        original_audio_path = job["steps"]["extract_audio"]["path"]
-    
-    if not original_audio_path or not os.path.exists(original_audio_path):
-        raise HTTPException(status_code=404, detail="Original audio not found")
-    
-    # Get generated voice
-    if "voice_history" not in job or len(job["voice_history"]) <= voice_index:
-        raise HTTPException(status_code=404, detail="Generated voice not found")
-    
-    generated_audio_path = job["voice_history"][voice_index]["path"]
-    if not os.path.exists(generated_audio_path):
-        raise HTTPException(status_code=404, detail="Generated audio file not found")
-    
-    # Get audio durations
-    original_duration = get_audio_duration(original_audio_path)
-    generated_duration = get_audio_duration(generated_audio_path)
-    
-    # Get subtitle timing if available
-    subtitle_timing = []
-    if "steps" in job and "generate_subtitles" in job["steps"] and job["steps"]["generate_subtitles"]["status"] == "completed":
-        subtitle_path = job["steps"]["generate_subtitles"]["path"]
-        if os.path.exists(subtitle_path):
-            # Extract timing information from SRT
-            import re
-            with open(subtitle_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-            # Match SRT timing entries
-            timing_pattern = re.compile(r'(\d+)\s*\n(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})\s*\n([\s\S]*?)(?=\n\s*\n\s*\d+|\n\s*\n\s*$|$)')
-            matches = timing_pattern.findall(content)
-            
-            for idx, start_time, end_time, text in matches:
-                # Parse timing from SRT format
-                def parse_srt_time(time_str):
-                    h, m, s = time_str.replace(',', '.').split(':')
-                    return int(h) * 3600 + int(m) * 60 + float(s)
-                
-                start_sec = parse_srt_time(start_time)
-                end_sec = parse_srt_time(end_time)
-                
-                subtitle_timing.append({
-                    "index": int(idx),
-                    "start": start_sec,
-                    "end": end_sec,
-                    "text": text.strip()
-                })
-    
-    return {
-        "job_id": job_id,
-        "original_audio": {
-            "path": f"/outputs/{job_id}/audio_{job_id}.wav",
-            "duration": original_duration
-        },
-        "generated_audio": {
-            "path": f"/outputs/{job_id}/{os.path.basename(generated_audio_path)}",
-            "duration": generated_duration,
-            "voice_name": job["voice_history"][voice_index]["voice_name"]
-        },
-        "subtitle_timing": subtitle_timing
-    }
-
-@app.get("/voice-history/{job_id}")
-async def get_voice_history(job_id: str):
-    """Get the voice change history for a job"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    
-    # Return voice history or empty list if none exists
-    voice_history = job.get("voice_history", [])
-    
-    return {"voice_history": voice_history}
-
-@app.post("/clean-audio/{job_id}")
-async def clean_audio(
-    job_id: str,
-    enable_noise_reduction: bool = Form(True),
-    noise_reduction_sensitivity: float = Form(0.2),
-    enable_vad_cleaning: bool = Form(True),
-    vad_aggressiveness: int = Form(1)
-):
-    """Clean the audio by reducing noise and removing filler words"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    try:
-        video_path = job["video_path"]
-        output_dir = job["output_dir"]
-        
-        # Initialize VideoProcessor with appropriate settings
-        processor = VideoProcessor(video_path, debug_mode=True)
-        
-        # Set audio cleaning options
-        processor.noise_reduction_enabled = enable_noise_reduction
-        processor.noise_reduction_sensitivity = noise_reduction_sensitivity
-        processor.vad_cleaning_enabled = enable_vad_cleaning
-        processor.vad_aggressiveness = vad_aggressiveness
-        
-        # Clean audio
-        cleaned_audio_path = processor.clean_audio()
-        
-        # Copy the cleaned audio file to the job output directory
-        output_filename = f"cleaned_audio_{job_id}.wav"
-        output_path = os.path.join(output_dir, output_filename)
-        shutil.copy2(cleaned_audio_path, output_path)
-        
-        # Update job status
-        job["steps"]["clean_audio"]["status"] = "completed"
-        job["steps"]["clean_audio"]["path"] = output_path
-        job["status"] = "audio_cleaned"
-        
-        return {
-            "job_id": job_id, 
-            "status": "audio_cleaned", 
-            "cleaned_audio_path": f"/outputs/{job_id}/{output_filename}"
-        }
-        
-    except Exception as e:
-        job["steps"]["clean_audio"]["status"] = "failed"
-        job["steps"]["clean_audio"]["error"] = str(e)
-        return JSONResponse(
-            status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
-        )
-
-@app.post("/create-final-video/{job_id}")
-async def create_final_video(
-    job_id: str,
-    subtitle_path: str = Form(None),
-    font_size: int = Form(24),
-    subtitle_color: str = Form("white"),
-    subtitle_bg_opacity: int = Form(80),
-    use_direct_ffmpeg: bool = Form(True),
-    audio_id: str = Form("cleaned"),  # Default to cleaned audio
-    subtitle_id: str = Form(None)     # Added subtitle_id parameter
-):
-    """Create the final video with clean audio and subtitles"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    try:
-        video_path = job["video_path"]
-        output_dir = job["output_dir"]
-        
-        # Determine which subtitle file to use based on subtitle_id or subtitle_path
-        subtitle_file_to_use = None
-        
-        print(f"Subtitle ID selected: {subtitle_id}")
-        print(f"Subtitle path provided: {subtitle_path}")
-        
-        if subtitle_id:
-            # Use subtitle based on ID
-            if subtitle_id == "original" and "steps" in job and "generate_subtitles" in job["steps"] and job["steps"]["generate_subtitles"]["status"] == "completed":
-                subtitle_file_to_use = job["steps"]["generate_subtitles"]["path"]
-                print(f"Using original subtitles based on ID: {subtitle_file_to_use}")
-            elif subtitle_id == "edited" and "edited_subtitle_path" in job:
-                subtitle_file_to_use = job["edited_subtitle_path"]
-                print(f"Using edited subtitles based on ID: {subtitle_file_to_use}")
-            elif subtitle_id == "marathi" and "translated_subtitle_path_mr" in job:
-                subtitle_file_to_use = job["translated_subtitle_path_mr"]
-                print(f"Using Marathi subtitles based on ID: {subtitle_file_to_use}")
-            elif subtitle_id == "hindi" and "translated_subtitle_path_hi" in job:
-                subtitle_file_to_use = job["translated_subtitle_path_hi"]
-                print(f"Using Hindi subtitles based on ID: {subtitle_file_to_use}")
-            else:
-                print(f"Could not find subtitles for ID: {subtitle_id}")
-        elif subtitle_path:
-            # Use provided path (from frontend)
-            subtitle_file_to_use = subtitle_path
-            print(f"Using provided subtitle path: {subtitle_file_to_use}")
-        elif "edited_subtitle_path" in job and job["edited_subtitle_path"]:
-            # Use edited subtitles
-            subtitle_file_to_use = job["edited_subtitle_path"]
-            print(f"Using edited subtitle path: {subtitle_file_to_use}")
-        elif job["steps"]["generate_subtitles"]["status"] == "completed":
-            # Use original subtitles
-            subtitle_file_to_use = job["steps"]["generate_subtitles"]["path"]
-            print(f"Using original subtitle path: {subtitle_file_to_use}")
-        else:
-            print("No suitable subtitle file found")
-        
-        # Verify that the selected subtitle file exists
-        if subtitle_file_to_use and not os.path.exists(subtitle_file_to_use):
-            print(f"Warning: Selected subtitle file does not exist: {subtitle_file_to_use}")
-            subtitle_file_to_use = None
-            
-        # Determine which audio file to use based on audio_id
-        custom_audio_path = None
-        
-        print(f"Audio ID selected: {audio_id}")
-        print(f"Available voice history: {len(job.get('voice_history', []))} items")
-        
-        if audio_id == "original" and "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
-            custom_audio_path = job["steps"]["extract_audio"]["path"]
-            print(f"Using original audio: {custom_audio_path}")
-        elif audio_id == "cleaned" and "steps" in job and "clean_audio" in job["steps"] and job["steps"]["clean_audio"]["status"] == "completed":
-            custom_audio_path = job["steps"]["clean_audio"]["path"]
-            print(f"Using cleaned audio: {custom_audio_path}")
-        elif audio_id and audio_id.startswith("voice_") and "voice_history" in job:
-            try:
-                voice_index = int(audio_id.split("_")[1])
-                if 0 <= voice_index < len(job["voice_history"]):
-                    custom_audio_path = job["voice_history"][voice_index]["path"]
-                    print(f"Using voice changed audio #{voice_index}: {custom_audio_path}")
-                else:
-                    print(f"Voice index {voice_index} out of range (0-{len(job['voice_history'])-1})")
-            except (ValueError, IndexError) as e:
-                print(f"Error parsing voice index from {audio_id}: {str(e)}")
-        else:
-            print(f"Could not match audio_id {audio_id} to any available audio")
-            # Fallback to using cleaned audio if available
-            if "steps" in job and "clean_audio" in job["steps"] and job["steps"]["clean_audio"]["status"] == "completed":
-                custom_audio_path = job["steps"]["clean_audio"]["path"]
-                print(f"Falling back to cleaned audio: {custom_audio_path}")
-            # Otherwise try original audio
-            elif "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
-                custom_audio_path = job["steps"]["extract_audio"]["path"]
-                print(f"Falling back to original audio: {custom_audio_path}")
-        
-        # Check if the selected audio file exists
-        if custom_audio_path and not os.path.exists(custom_audio_path):
-            custom_audio_path = None
-            print(f"Warning: Selected audio file does not exist: {custom_audio_path}")
-        
-        # Initialize VideoProcessor with appropriate settings
-        processor = VideoProcessor(video_path, debug_mode=True)
-        
-        # Set subtitle options
-        processor.subtitle_font_size = font_size
-        processor.subtitle_color = subtitle_color
-        processor.subtitle_bg_opacity = subtitle_bg_opacity
-        processor.use_direct_ffmpeg = use_direct_ffmpeg
-        
-        # Create final video with custom audio if available
-        final_video_path = processor.create_final_video(
-            custom_subtitle_path=subtitle_file_to_use,
-            custom_audio_path=custom_audio_path
-        )
-        
-        # Copy the final video file to the job output directory
-        output_filename = f"final_video_{job_id}.mp4"
-        output_path = os.path.join(output_dir, output_filename)
-        shutil.copy2(final_video_path, output_path)
-        
-        # Update job status
-        job["steps"]["create_final_video"]["status"] = "completed"
-        job["steps"]["create_final_video"]["path"] = output_path
-        job["status"] = "completed"
-        
-        # Store the selected audio and subtitle choices in the job data
-        job["final_audio_id"] = audio_id
-        job["final_subtitle_id"] = subtitle_id
-        
-        return {
-            "job_id": job_id, 
-            "status": "completed", 
-            "final_video_path": f"/outputs/{job_id}/{output_filename}"
-        }
-        
-    except Exception as e:
-        job["steps"]["create_final_video"]["status"] = "failed"
-        job["steps"]["create_final_video"]["error"] = str(e)
-        return JSONResponse(
-            status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
+            content={"job_id": str(job.id), "status": "failed_to_save_edited_subtitles", "error": str(e)}
         )
 
 @app.get("/job-status/{job_id}")
-async def get_job_status(job_id: str):
-    """Get the status of a processing job"""
-    if job_id not in processing_jobs:
+async def get_job_status(job_id: str, db: Session = Depends(get_db)):
+    """Get the status of a processing job (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    return processing_jobs[job_id]
-
-@app.get("/video-info/{job_id}")
-async def get_video_info(job_id: str):
-    """Get information about the video"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    try:
-        video_path = job["video_path"]
-        
-        # Initialize VideoProcessor
-        processor = VideoProcessor(video_path)
-        
-        # Get video info
-        video_info = processor.get_video_info()
-        
-        return {
-            "job_id": job_id,
-            "video_info": video_info
-        }
-        
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
-        )
+    steps = db.query(JobStep).filter(JobStep.job_id == job.id).all()
+    step_dict = {step.step_name: {"status": step.status, "path": step.file_path} for step in steps}
+    return {
+        "id": str(job.id),
+        "filename": job.filename,
+        "status": job.status,
+        "upload_time": job.upload_time.isoformat() if job.upload_time else None,
+        "video_path": job.video_path, # Be cautious about exposing full paths if not needed by client
+        "output_dir": job.output_dir, # Same caution as above
+        "current_step": job.current_step,
+        "steps": step_dict
+    }
 
 @app.get("/download/{job_id}/{file_type}")
-async def download_file(job_id: str, file_type: str):
-    """Download a processed file"""
-    if job_id not in processing_jobs:
+async def download_file(job_id: str, file_type: str, db: Session = Depends(get_db)):
+    """Download a processed file (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    
+    file_path_to_serve = None
+    filename_for_download = f"{file_type}_{job_id}"
+
+    if file_type == "audio":
+        audio_step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "extract_audio").first()
+        if audio_step and audio_step.status == "completed" and audio_step.file_path and os.path.exists(audio_step.file_path):
+            file_path_to_serve = audio_step.file_path
+            filename_for_download += ".wav"
+    elif file_type == "subtitles":
+        # Prefer latest edited, then latest original
+        subtitle_record = db.query(Subtitle).filter(Subtitle.job_id == job.id).order_by(Subtitle.type.desc(), Subtitle.created_at.desc()).first()
+        if subtitle_record and subtitle_record.file_path and os.path.exists(subtitle_record.file_path):
+            file_path_to_serve = subtitle_record.file_path
+            filename_for_download += ".srt"
+    elif file_type == "cleaned_audio":
+        # Get the latest cleaned audio from AudioFile table or clean_audio step
+        cleaned_audio_record = db.query(AudioFile).filter(AudioFile.job_id == job.id, AudioFile.type.like("cleaned%")).order_by(AudioFile.created_at.desc()).first()
+        if cleaned_audio_record and cleaned_audio_record.file_path and os.path.exists(cleaned_audio_record.file_path):
+             file_path_to_serve = cleaned_audio_record.file_path
+             filename_for_download += ".wav"
+        else: # Fallback to JobStep if AudioFile not found or path invalid
+            audio_step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "clean_audio").first()
+            if audio_step and audio_step.status == "completed" and audio_step.file_path and os.path.exists(audio_step.file_path):
+                file_path_to_serve = audio_step.file_path
+                filename_for_download += ".wav"
+    elif file_type == "final_video":
+        video_step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "create_final_video").first()
+        if video_step and video_step.status == "completed" and video_step.file_path and os.path.exists(video_step.file_path):
+            file_path_to_serve = video_step.file_path
+            filename_for_download += ".mp4"
+    else:
+        raise HTTPException(status_code=400, detail="Invalid file type requested")
+
+    if not file_path_to_serve:
+        raise HTTPException(status_code=404, detail=f"{file_type.replace('_', ' ').title()} not ready or not found for job {job_id}")
         
-    job = processing_jobs[job_id]
-    
-    # Map file_type to step and file extension
-    file_mappings = {
-        "audio": ("extract_audio", "wav"),
-        "subtitles": ("generate_subtitles", "srt"),
-        "cleaned_audio": ("clean_audio", "wav"),
-        "final_video": ("create_final_video", "mp4")
-    }
-    
-    if file_type not in file_mappings:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-    
-    step, extension = file_mappings[file_type]
-    
-    # Check if the file exists and is ready
-    if job["steps"][step]["status"] != "completed":
-        raise HTTPException(status_code=404, detail=f"{file_type} not ready or not found")
-    
-    file_path = job["steps"][step]["path"]
-    
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Return the file
-    return FileResponse(file_path, filename=f"{file_type}_{job_id}.{extension}")
+    return FileResponse(file_path_to_serve, filename=filename_for_download)
+
 
 @app.get("/subtitle-content/{job_id}")
-async def get_subtitle_content(job_id: str):
-    """Get the subtitle content for a job"""
-    if job_id not in processing_jobs:
+async def get_subtitle_content(job_id: str, db: Session = Depends(get_db)):
+    """Get the subtitle content for a job (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    subtitle_path = None
     
-    # First try edited subtitles if they exist
-    if "edited_subtitle_path" in job and job["edited_subtitle_path"]:
-        subtitle_path = job["edited_subtitle_path"]
-    # Then try original subtitles
-    elif job["steps"]["generate_subtitles"]["status"] == "completed":
-        subtitle_path = job["steps"]["generate_subtitles"]["path"]
-        
-    if not subtitle_path or not os.path.exists(subtitle_path):
-        raise HTTPException(status_code=404, detail="Subtitle file not found")
+    # Prefer latest edited, then latest original, then fallback
+    subtitle = db.query(Subtitle).filter(Subtitle.job_id == job.id)\
+                                 .order_by(Subtitle.type.desc(), Subtitle.created_at.desc())\
+                                 .first()
     
+    if not subtitle or not subtitle.file_path or not os.path.exists(subtitle.file_path):
+        # Check JobStep as a fallback if no Subtitle record or file missing
+        subtitle_step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "generate_subtitles").first()
+        if subtitle_step and subtitle_step.file_path and os.path.exists(subtitle_step.file_path):
+            file_to_read = subtitle_step.file_path
+        else:
+            raise HTTPException(status_code=404, detail="Subtitle file not found for this job.")
+    else:
+        file_to_read = subtitle.file_path
+        
     try:
-        with open(subtitle_path, 'r', encoding='utf-8') as f:
+        with open(file_to_read, 'r', encoding='utf-8') as f:
             subtitle_content = f.read()
-        
-        return {"subtitle_content": subtitle_content}
+        return {"subtitle_content": subtitle_content, "file_path": file_to_read, "type": subtitle.type if subtitle else "unknown"}
     except Exception as e:
+        print(f"Error reading subtitle file {file_to_read} for job {job_id}: {e}")
         return JSONResponse(
             status_code=500,
             content={"error": f"Failed to read subtitle file: {str(e)}"}
         )
 
-@app.post("/translate-subtitles/{job_id}")
-async def translate_subtitles(
-    job_id: str,
-    target_language: str = Form(...),  # 'mr' for Marathi, 'hi' for Hindi
-    content: str = Form(...)  # Subtitle content to translate
-):
-    """Translate subtitles to the target language"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    
-    try:
-        # Import required libraries
-        import srt
-        from googletrans import Translator, LANGUAGES
-        
-        # Validate target language
-        if target_language not in ['mr', 'hi']:
-            raise HTTPException(status_code=400, detail=f"Unsupported target language '{target_language}'. Please use 'mr' for Marathi or 'hi' for Hindi.")
-        
-        # Parse the SRT content
-        try:
-            print(f"Parsing SRT content for job {job_id}...")
-            subtitles = list(srt.parse(content))
-            print(f"Successfully parsed {len(subtitles)} subtitles")
-        except Exception as parse_error:
-            print(f"Error parsing SRT content: {str(parse_error)}")
-            raise HTTPException(status_code=400, detail=f"Error parsing SRT content: {str(parse_error)}")
-        
-        if not subtitles:
-            raise HTTPException(status_code=400, detail="No subtitles found in the input content.")
-        
-        # Initialize the translator
-        translator = Translator(service_urls=['translate.google.com'])
-        translated_subtitles = []
-        
-        # For longer subtitle files, process in batches to avoid timeouts
-        batch_size = 20  # Process 20 subtitles at a time
-        total_batches = (len(subtitles) + batch_size - 1) // batch_size  # Ceiling division
-        
-        print(f"Starting translation to {target_language} in {total_batches} batches")
-        
-        for batch_idx in range(total_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, len(subtitles))
-            batch = subtitles[start_idx:end_idx]
-            
-            print(f"Processing batch {batch_idx+1}/{total_batches} (subtitles {start_idx+1}-{end_idx})")
-            
-            for sub in batch:
-                try:
-                    # Add a retry mechanism for each translation
-                    max_retries = 3
-                    for retry in range(max_retries):
-                        try:
-                            translation = translator.translate(sub.content, src='en', dest=target_language)
-                            translated_text = translation.text
-                            break
-                        except Exception as e:
-                            if retry < max_retries - 1:
-                                print(f"Translation attempt {retry+1} failed for subtitle {sub.index}, retrying...")
-                                time.sleep(1)  # Wait before retrying
-                            else:
-                                raise e
-                    
-                    translated_subtitles.append(
-                        srt.Subtitle(
-                            index=sub.index,
-                            start=sub.start,
-                            end=sub.end,
-                            content=translated_text,
-                            proprietary=sub.proprietary
-                        )
-                    )
-                except Exception as e:
-                    # Keep original text if translation fails
-                    print(f"Error translating subtitle {sub.index}: {str(e)}")
-                    print(f"Using original text for subtitle {sub.index}")
-                    translated_subtitles.append(sub)
-            
-            # Short pause between batches to prevent rate limiting
-            if batch_idx < total_batches - 1:
-                time.sleep(0.5)
-        
-        print(f"Translation complete. Composing final SRT file...")
-        
-        # Compose the final translated SRT content
-        translated_content = srt.compose(translated_subtitles)
-        
-        # Save the translated subtitle file
-        output_dir = job["output_dir"]
-        language_name = "marathi" if target_language == "mr" else "hindi"
-        output_filename = f"subtitles_{job_id}_{language_name}.srt"
-        output_path = os.path.join(output_dir, output_filename)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(translated_content)
-        
-        print(f"Translated subtitle file saved to {output_path}")
-        
-        # Store the translated subtitle path in the job data with language key
-        path_key = f"translated_subtitle_path_{target_language}"
-        job[path_key] = output_path
-        
-        print(f"Saved translated subtitle path in job data with key: {path_key}")
-        print(f"Updated job keys: {job.keys()}")
-        
-        return {
-            "job_id": job_id,
-            "status": "success",
-            "translated_content": translated_content,
-            "translated_subtitle_path": f"/outputs/{job_id}/{output_filename}"
-        }
-    except Exception as e:
-        import traceback
-        print(f"Error translating subtitles: {str(e)}")
-        print(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"job_id": job_id, "status": "failed", "error": str(e)}
-        )
-
-@app.post("/skip-voice-change/{job_id}")
-async def skip_voice_change(job_id: str, error_message: str = None):
-    """Skip the voice changing step and mark it as skipped"""
-    if job_id not in processing_jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
-    
-    # Update job status to indicate voice change was skipped
-    if "steps" not in job:
-        job["steps"] = {}
-    
-    if "change_voice" not in job["steps"]:
-        job["steps"]["change_voice"] = {}
-    
-    job["steps"]["change_voice"]["status"] = "skipped"
-    if error_message:
-        job["steps"]["change_voice"]["error"] = error_message
-    job["status"] = "voice_change_skipped"
-    
-    # Add an empty voice history if it doesn't exist
-    if "voice_history" not in job:
-        job["voice_history"] = []
-    
-    # Return a response that matches the structure the frontend expects
-    return {
-        "job_id": job_id,
-        "status": "voice_change_skipped",
-        "message": error_message or "Voice changing step was skipped",
-        "voice_changed_audio_path": None,  # Include this field even if null
-        "voice_history": job["voice_history"]
-    }
-
 @app.get("/available-audio/{job_id}")
-async def get_available_audio(job_id: str):
-    """Get a list of all available audio files for a job"""
-    if job_id not in processing_jobs:
+async def get_available_audio(job_id: str, db: Session = Depends(get_db)):
+    """Get a list of all available audio files for a job (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
+    
+    audio_files_from_db = db.query(AudioFile).filter(AudioFile.job_id == job.id).order_by(AudioFile.created_at.desc()).all()
     available_audio = []
     
-    print(f"Gathering available audio for job {job_id}")
-    
-    # Add original audio if available
-    if "steps" in job and "extract_audio" in job["steps"] and job["steps"]["extract_audio"]["status"] == "completed":
-        original_audio_path = job["steps"]["extract_audio"]["path"]
-        if os.path.exists(original_audio_path):
-            print(f"Found original audio: {original_audio_path}")
+    for audio in audio_files_from_db:
+        if audio.file_path and os.path.exists(audio.file_path):
+            relative_path = f"/outputs/{job_id}/{os.path.basename(audio.file_path)}"
             available_audio.append({
-                "id": "original",
-                "name": "Original Audio",
-                "path": original_audio_path,
-                "url_path": f"/outputs/{job_id}/audio_{job_id}.wav",
-                "type": "original"
+                "id": str(audio.id), # AudioFile table primary key
+                "type": audio.type,
+                "label": audio.label or audio.type.title().replace("_", " "),
+                "path": audio.file_path, # Absolute path (for server-side use)
+                "url": relative_path,   # Relative path (for client-side use via /outputs mount)
+                "voice_id": audio.voice_id, # If applicable
+                "name": audio.label or os.path.basename(audio.file_path), 
+                "created_at": audio.created_at.isoformat() if audio.created_at else None
             })
-    
-    # Add cleaned audio if available
-    if "steps" in job and "clean_audio" in job["steps"] and job["steps"]["clean_audio"]["status"] == "completed":
-        cleaned_audio_path = job["steps"]["clean_audio"]["path"]
-        if os.path.exists(cleaned_audio_path):
-            print(f"Found cleaned audio: {cleaned_audio_path}")
-            available_audio.append({
-                "id": "cleaned",
-                "name": "Cleaned Audio",
-                "path": cleaned_audio_path,
-                "url_path": f"/outputs/{job_id}/cleaned_audio_{job_id}.wav",
-                "type": "cleaned"
-            })
-    
-    # Add voice changed audio files if available
-    if "voice_history" in job and job["voice_history"]:
-        print(f"Found {len(job['voice_history'])} voice history entries")
-        for i, voice in enumerate(job["voice_history"]):
-            if "path" in voice and os.path.exists(voice["path"]):
-                print(f"Found voice {i}: {voice.get('voice_name', f'Voice {i+1}')} at {voice['path']}")
-                available_audio.append({
-                    "id": f"voice_{i}",
-                    "name": f"{voice.get('voice_name', f'Voice {i+1}')}",
-                    "path": voice["path"],
-                    "url_path": voice["url_path"],
-                    "type": "voice_changed",
-                    "voice_id": voice.get("voice_id", ""),
-                    "language": voice.get("language", "en")
-                })
-            else:
-                print(f"Voice {i} has no path or file doesn't exist: {voice.get('path', 'No path')}")
-    
-    # Force at least one audio option if list is empty
-    if not available_audio and "steps" in job and "extract_audio" in job["steps"]:
-        # Try to create a minimal entry based on job data
-        extract_step = job["steps"]["extract_audio"]
-        if "path" in extract_step:
-            audio_path = extract_step["path"]
-            print(f"No audio files found, using fallback: {audio_path}")
-            available_audio.append({
-                "id": "original",
-                "name": "Original Audio (Fallback)",
-                "path": audio_path,
-                "url_path": f"/outputs/{job_id}/audio_{job_id}.wav",
-                "type": "original"
-            })
-    
-    print(f"Returning {len(available_audio)} audio files")
+        else:
+            print(f"Warning: Audio file record exists but file not found on disk - {audio.file_path} for job {job_id}")
+            
     return {"available_audio": available_audio}
 
 @app.get("/available-subtitles/{job_id}")
-async def get_available_subtitles(job_id: str):
-    """Get a list of all available subtitle files for a job"""
-    if job_id not in processing_jobs:
+async def get_available_subtitles(job_id: str, db: Session = Depends(get_db)):
+    """Get a list of all available subtitle files for a job (DB version)"""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    job = processing_jobs[job_id]
+    
+    subtitles_from_db = db.query(Subtitle).filter(Subtitle.job_id == job.id).order_by(Subtitle.created_at.desc()).all()
     available_subtitles = []
     
-    print(f"Gathering available subtitles for job {job_id}")
-    
-    # Add original subtitles if available
-    if "steps" in job and "generate_subtitles" in job["steps"] and job["steps"]["generate_subtitles"]["status"] == "completed":
-        subtitle_path = job["steps"]["generate_subtitles"]["path"]
-        if os.path.exists(subtitle_path):
-            print(f"Found original subtitles: {subtitle_path}")
+    for sub in subtitles_from_db:
+        if sub.file_path and os.path.exists(sub.file_path):
+            relative_path = f"/outputs/{job_id}/{os.path.basename(sub.file_path)}"
             available_subtitles.append({
-                "id": "original",
-                "name": "Original Subtitles",
-                "path": subtitle_path,
-                "url_path": f"/outputs/{job_id}/subtitles_{job_id}.srt",
-                "type": "original",
-                "language": job.get("language", "en")
+                "id": str(sub.id), # Subtitle table primary key
+                "type": sub.type,
+                "label": sub.type.title().replace("_", " ") + " Subtitles",
+                "path": sub.file_path, # Absolute path
+                "url": relative_path,   # Relative path for client
+                "created_at": sub.created_at.isoformat() if sub.created_at else None,
+                "name": os.path.basename(sub.file_path)
             })
-    
-    # Add edited subtitles if available
-    if "edited_subtitle_path" in job and job["edited_subtitle_path"]:
-        edited_subtitle_path = job["edited_subtitle_path"]
-        if os.path.exists(edited_subtitle_path):
-            print(f"Found edited subtitles: {edited_subtitle_path}")
-            available_subtitles.append({
-                "id": "edited",
-                "name": "Edited Subtitles",
-                "path": edited_subtitle_path,
-                "url_path": edited_subtitle_path.replace(str(OUTPUT_DIR), "/outputs"),
-                "type": "edited",
-                "language": job.get("language", "en")
-            })
-    
-    # Add translated Marathi subtitles if available
-    if "translated_subtitle_path_mr" in job and job["translated_subtitle_path_mr"]:
-        mr_subtitle_path = job["translated_subtitle_path_mr"]
-        if os.path.exists(mr_subtitle_path):
-            print(f"Found Marathi subtitles: {mr_subtitle_path}")
-            available_subtitles.append({
-                "id": "marathi",
-                "name": "Marathi Subtitles",
-                "path": mr_subtitle_path,
-                "url_path": mr_subtitle_path.replace(str(OUTPUT_DIR), "/outputs"),
-                "type": "translated",
-                "language": "mr"
-            })
-    
-    # Add translated Hindi subtitles if available
-    if "translated_subtitle_path_hi" in job and job["translated_subtitle_path_hi"]:
-        hi_subtitle_path = job["translated_subtitle_path_hi"]
-        if os.path.exists(hi_subtitle_path):
-            print(f"Found Hindi subtitles: {hi_subtitle_path}")
-            available_subtitles.append({
-                "id": "hindi",
-                "name": "Hindi Subtitles",
-                "path": hi_subtitle_path,
-                "url_path": hi_subtitle_path.replace(str(OUTPUT_DIR), "/outputs"),
-                "type": "translated",
-                "language": "hi"
-            })
-    
-    print(f"Returning {len(available_subtitles)} subtitle files")
+        else:
+            print(f"Warning: Subtitle file record exists but file not found on disk - {sub.file_path} for job {job_id}")
+            
     return {"available_subtitles": available_subtitles}
 
-# Run the server if executed directly
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    host = os.getenv("HOST", "0.0.0.0")
-    debug = os.getenv("DEBUG", "False").lower() in ("true", "1", "t")
+
+@app.delete("/project/{job_id}")
+async def delete_project(job_id: str, db: Session = Depends(get_db)):
+    """Delete a project/job and all related files and DB records."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job_output_dir_path = job.output_dir
+    job_upload_dir_path = None
+    if job.video_path:
+        job_upload_dir_path = os.path.dirname(job.video_path)
+
+    # Delete from DB (cascades to steps, subtitles, audio_files due to foreign key constraints with onDelete='CASCADE')
+    try:
+        db.delete(job)
+        db.commit()
+    except Exception as e_db:
+        db.rollback() # Rollback in case of DB error
+        print(f"Error deleting job {job_id} from database: {e_db}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete job from database: {str(e_db)}")
+
+    # Remove files from disk AFTER successful DB deletion
+    try:
+        # Delete the specific output directory for the job
+        if job_output_dir_path and os.path.exists(job_output_dir_path) and str(job.id) in job_output_dir_path: # Safety check
+            shutil.rmtree(job_output_dir_path, ignore_errors=True)
+            print(f"Deleted output directory: {job_output_dir_path}")
+
+        # Delete the specific upload directory for the job (which contains the original video)
+        if job_upload_dir_path and os.path.exists(job_upload_dir_path) and str(job.id) in job_upload_dir_path: # Safety check
+            shutil.rmtree(job_upload_dir_path, ignore_errors=True)
+            print(f"Deleted upload directory: {job_upload_dir_path}")
+            
+    except Exception as e_fs:
+        # Log FS deletion error but don't fail the request if DB deletion was successful
+        print(f"Warning: Failed to delete all files for job {job_id} from filesystem: {e_fs}")
     
-    uvicorn.run("main:app", host=host, port=port, reload=debug) 
+    return {"job_id": job_id, "status": "deleted", "message": "Project and associated data deleted."}
+
+
+@app.get("/projects")
+async def get_all_projects(db: Session = Depends(get_db)):
+    """Fetch all projects from the database."""
+    print("Received request to fetch all projects")
+    projects = db.query(Job).order_by(Job.upload_time.desc()).all() # Fetch latest first
+    project_list = []
+    for project in projects:
+        project_list.append({
+            "id": str(project.id),
+            "filename": project.filename,
+            "name": project.filename, # Keep 'name' for consistency if frontend uses it
+            "status": project.status,
+            "upload_time": project.upload_time.isoformat() if project.upload_time else None,
+            "current_step": project.current_step,
+            # Avoid exposing full file paths unless necessary for client functionality not served by /download or /outputs
+            # "video_path": project.video_path,
+            # "output_dir": project.output_dir,
+        })
+    return project_list
+
+
+@app.post("/clean-audio/{job_id}")
+async def clean_audio(
+    job_id: str, 
+    audio_file_id: Optional[str] = Form(None), # Optional: ID of specific AudioFile entry to clean
+    noise_reduction_sensitivity: float = Form(0.8), # Default, matches AudioCleaner
+    vad_aggressiveness: int = Form(1),          # Default, matches AudioCleaner
+    db: Session = Depends(get_db)
+):
+    """Clean an audio file for a job (DB version).
+    If audio_file_id is provided, it cleans that specific audio.
+    Otherwise, it defaults to cleaning the 'original' extracted audio for the job.
+    Saves the new cleaned audio and adds a record to AudioFile history.
+    """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    print(f"Initiating audio cleaning for job_id: {job_id}. Sensitivity: {noise_reduction_sensitivity}, VAD: {vad_aggressiveness}")
+
+    audio_to_clean_path = None
+    original_audio_label_for_filename = "audio"
+
+    if audio_file_id:
+        audio_file_record = db.query(AudioFile).filter(AudioFile.id == audio_file_id, AudioFile.job_id == job_id).first()
+        if not audio_file_record or not audio_file_record.file_path or not os.path.exists(audio_file_record.file_path):
+            raise HTTPException(status_code=404, detail=f"Specified audio file (ID: {audio_file_id}) not found or path invalid for job {job_id}.")
+        audio_to_clean_path = audio_file_record.file_path
+        original_audio_label_for_filename = Path(audio_to_clean_path).stem
+        print(f"[Job {job_id}] Cleaning specified audio: {audio_to_clean_path}")
+    else:
+        # Default to the 'original' extracted audio
+        original_audio_record = db.query(AudioFile).filter(AudioFile.job_id == job.id, AudioFile.type == "original").first()
+        if not original_audio_record or not original_audio_record.file_path or not os.path.exists(original_audio_record.file_path):
+            # Fallback: check JobStep for 'extract_audio' if no 'original' AudioFile record
+            extract_audio_step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == "extract_audio").first()
+            if not extract_audio_step or not extract_audio_step.file_path or not os.path.exists(extract_audio_step.file_path):
+                error_msg = "Default original extracted audio not found for this job. Cannot perform cleaning."
+                print(f"[Job {job_id}] Error: {error_msg}")
+                # Update DB for failure
+                # ... (status update logic) ...
+                raise HTTPException(status_code=404, detail=error_msg)
+            audio_to_clean_path = extract_audio_step.file_path
+        else:
+            audio_to_clean_path = original_audio_record.file_path
+        
+        original_audio_label_for_filename = Path(audio_to_clean_path).stem
+        print(f"[Job {job_id}] Cleaning default original audio: {audio_to_clean_path}")
+
+    job_specific_output_dir = job.output_dir
+    Path(job_specific_output_dir).mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+    cleaned_audio_filename = f"{original_audio_label_for_filename}_cleaned_{timestamp}.wav"
+    final_cleaned_audio_output_path = os.path.join(job_specific_output_dir, cleaned_audio_filename)
+    
+    current_step_name = "clean_audio" # The general step being performed
+
+    try:
+        print(f"[Job {job_id}] Initializing AudioCleaner. Source: '{audio_to_clean_path}', Target: '{final_cleaned_audio_output_path}'")
+        
+        cleaner = AudioCleaner(
+            audio_path=audio_to_clean_path,
+            output_dir=job_specific_output_dir, # For intermediates
+            noise_reduction_sensitivity=noise_reduction_sensitivity,
+            vad_aggressiveness=vad_aggressiveness
+        )
+        
+        actually_produced_path = cleaner.clean(output_path=final_cleaned_audio_output_path)
+
+        if not os.path.exists(actually_produced_path) or actually_produced_path != final_cleaned_audio_output_path:
+            error_message = (f"[Job {job_id}] Audio cleaning finished, but expected output "
+                             f"{final_cleaned_audio_output_path} was not created or path mismatch. "
+                             f"Got: {actually_produced_path}")
+            print(error_message)
+            raise Exception(error_message)
+
+        # Update or create 'clean_audio' JobStep
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == current_step_name).first()
+        if step:
+            step.status = "completed"
+            step.file_path = actually_produced_path
+            step.finished_at = datetime.utcnow()
+        else: # Should not happen if steps are pre-created, but as a fallback
+            step = JobStep(job_id=job.id, step_name=current_step_name, status="completed", file_path=actually_produced_path, finished_at=datetime.utcnow())
+            db.add(step)
+        
+        job.status = "audio_cleaned" # Or a more specific status like "custom_audio_cleaned"
+        job.current_step = current_step_name
+        
+        # Add to AudioFile history
+        cleaned_audio_record = AudioFile(
+            job_id=job.id,
+            type="cleaned", # Could be "cleaned_custom_settings" if params were not default
+            file_path=actually_produced_path,
+            label=f"Cleaned ({Path(audio_to_clean_path).name} @ {timestamp})",
+            created_at=datetime.utcnow()
+            # You could also store `noise_reduction_sensitivity` and `vad_aggressiveness` here if needed
+        )
+        db.add(cleaned_audio_record)
+        db.commit()
+
+        print(f"[Job {job_id}] Audio cleaning successful. Output: {actually_produced_path}")
+        return {
+            "job_id": str(job.id),
+            "status": "audio_cleaned_successfully",
+            "cleaned_audio_path": f"/outputs/{job.id}/{cleaned_audio_filename}", # Relative path for frontend
+            "file_path": actually_produced_path,    # Absolute path
+            "label": cleaned_audio_record.label,
+            "audio_file_id": str(cleaned_audio_record.id), # ID of the new AudioFile record
+            "created_at": cleaned_audio_record.created_at.isoformat()
+        }
+    except HTTPException as http_exc:
+        # db.rollback() # Rollback if necessary, though commit happens only on success typically
+        raise http_exc # Re-raise FastAPI/Starlette HTTPExceptions
+    except Exception as e:
+        db.rollback() # Rollback on other exceptions before updating status
+        error_info = f"[Job {job_id}] Unhandled error during audio cleaning: {e}"
+        print(error_info)
+        print(traceback.format_exc())
+        
+        step = db.query(JobStep).filter(JobStep.job_id == job.id, JobStep.step_name == current_step_name).first()
+        if step:
+            step.status = "failed"
+            # step.details = str(e)
+        job.status = f"{current_step_name}_failed"
+        job.current_step = current_step_name
+        db.commit() # Commit failure status
+        
+        return JSONResponse(
+            status_code=500,
+            content={"job_id": str(job.id), "status": "failed_processing_error", "error": f"An internal error occurred: {str(e)}"}
+        )
+
+
+@app.get("/project/{job_id}/clean-audio-files") # Renamed for clarity from the older example
+async def get_job_cleaned_audio_files(job_id: str, db: Session = Depends(get_db)):
+    """List all 'cleaned' type audio files for a specific job."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Query AudioFile table for records associated with this job_id and of type 'cleaned' or similar
+    cleaned_audio_files_db = db.query(AudioFile)\
+        .filter(AudioFile.job_id == job.id, AudioFile.type.like("cleaned%"))\
+        .order_by(AudioFile.created_at.desc())\
+        .all()
+
+    result = []
+    for audio_db_record in cleaned_audio_files_db:
+        if audio_db_record.file_path and os.path.exists(audio_db_record.file_path):
+            relative_url = f"/outputs/{job.id}/{os.path.basename(audio_db_record.file_path)}"
+            result.append({
+                "id": str(audio_db_record.id),
+                "path": audio_db_record.file_path, # Absolute server path
+                "url": relative_url,               # URL for client access
+                "label": audio_db_record.label or "Cleaned Audio",
+                "name": audio_db_record.label or os.path.basename(audio_db_record.file_path),
+                "created_at": audio_db_record.created_at.isoformat() if audio_db_record.created_at else None,
+                "type": audio_db_record.type
+                # You can add other metadata stored in AudioFile record here
+            })
+        else:
+            print(f"Warning: Cleaned audio record ID {audio_db_record.id} file not found: {audio_db_record.file_path}")
+            
+    return {"job_id": str(job.id), "cleaned_audio_files": result}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    # Ensure necessary directories exist
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"UPLOAD_DIR: {UPLOAD_DIR.resolve()}")
+    print(f"OUTPUT_DIR: {OUTPUT_DIR.resolve()}")
+    
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
