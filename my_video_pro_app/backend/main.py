@@ -897,37 +897,32 @@ async def generate_tts(
     voice_id: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    """Generate speech from subtitle text"""
+    """Generate speech from subtitle text (segment by segment)"""
     try:
         # Get subtitle content
         subtitle = db.query(Subtitle).filter(Subtitle.id == subtitle_id, Subtitle.job_id == job_id).first()
         if not subtitle or not subtitle.file_path or not os.path.exists(subtitle.file_path):
             raise HTTPException(status_code=404, detail="Subtitle file not found")
 
-        # Read subtitle content
-        with open(subtitle.file_path, 'r', encoding='utf-8') as f:
-            srt_content = f.read()
-
-        # Extract text from SRT
-        text = tts_generator.extract_text_from_srt(srt_content)
-
         # Generate output path
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        tts_final_dir = os.path.join(OUTPUT_DIR, str(job_id), "tts_final")
+        os.makedirs(tts_final_dir, exist_ok=True)
         output_filename = f"tts_{job_id}_{timestamp}.mp3"
-        output_path = os.path.join(OUTPUT_DIR, str(job_id), output_filename)
+        output_path = os.path.join(tts_final_dir, output_filename)
 
-        # Ensure output directory exists
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-        # Generate speech
-        result = tts_generator.generate_speech(text, voice_id, output_path)
+        # Use the new segment-by-segment TTS logic
+        tts_generator.generate_speech_from_srt(subtitle.file_path, output_path, voice_id)
 
         # Add to AudioFile table
+        label = f"Final Synchronized TTS Audio ({os.path.basename(subtitle.file_path)})"
+        if len(label) > 100:
+            label = label[:97] + '...'
         audio_file = AudioFile(
             job_id=job_id,
             type="tts_generated",
             file_path=output_path,
-            label=f"TTS Generated ({os.path.basename(subtitle.file_path)})",
+            label=label,
             voice_id=voice_id,
             created_at=datetime.utcnow()
         )
@@ -936,7 +931,7 @@ async def generate_tts(
 
         return {
             "status": "success",
-            "audioUrl": f"/outputs/{job_id}/{output_filename}",
+            "audioUrl": f"/outputs/{job_id}/tts_final/{output_filename}",
             "audioFileId": str(audio_file.id)
         }
 

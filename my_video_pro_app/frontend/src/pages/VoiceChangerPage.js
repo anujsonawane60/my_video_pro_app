@@ -28,7 +28,7 @@ import StopIcon from '@mui/icons-material/Stop';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import TextFieldsIcon from '@mui/icons-material/TextFields';
 import SwapHorizIcon from '@mui/icons-material/SwapHoriz';
-import { getAvailableAudio, getAvailableSubtitles, getVoices } from '../services/api';
+import { getAvailableAudio, getAvailableSubtitles, getVoices, generateTTS, generateSTS, getFileUrl } from '../services/api';
 
 const VoiceChangerPage = () => {
   const { projectId } = useParams();
@@ -44,6 +44,8 @@ const VoiceChangerPage = () => {
   const [generatedAudio, setGeneratedAudio] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioPlayer, setAudioPlayer] = useState(null);
+  const [audioHistory, setAudioHistory] = useState([]);
+  const [stsHistory, setStsHistory] = useState([]);
 
   // Fetch available voices
   useEffect(() => {
@@ -75,6 +77,37 @@ const VoiceChangerPage = () => {
     fetchFiles();
   }, [projectId]);
 
+  // Fetch TTS and STS audio history
+  useEffect(() => {
+    const fetchAudioHistory = async () => {
+      try {
+        const data = await getAvailableAudio(projectId);
+        console.log('Raw audio data:', data);
+        const files = Array.isArray(data) ? data : (data.available_audio || []);
+        
+        // Filter TTS history
+        const ttsFiltered = files.filter(f => 
+          f.type === 'tts_generated' && 
+          (f.path?.includes(projectId) || f.url?.includes(projectId))
+        );
+        console.log('Filtered TTS history:', ttsFiltered);
+        setAudioHistory(ttsFiltered);
+
+        // Filter STS history
+        const stsFiltered = files.filter(f => 
+          f.type === 'sts_generated' && 
+          (f.path?.includes(projectId) || f.url?.includes(projectId))
+        );
+        console.log('Filtered STS history:', stsFiltered);
+        setStsHistory(stsFiltered);
+      } catch (e) {
+        console.error('Error fetching audio history:', e);
+        // Ignore errors for history
+      }
+    };
+    fetchAudioHistory();
+  }, [projectId, generatedAudio]);
+
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
     setSelectedFile(null);
@@ -101,24 +134,14 @@ const VoiceChangerPage = () => {
     setSuccess(null);
 
     try {
-      const endpoint = activeTab === 0 ? '/api/tts' : '/api/sts';
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          projectId,
-          fileId: selectedFile.id,
-          voiceId: selectedVoice,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to generate audio');
+      let data;
+      if (activeTab === 0) {
+        // TTS
+        data = await generateTTS(projectId, selectedFile.id, selectedVoice);
+      } else {
+        // STS
+        data = await generateSTS(projectId, selectedFile.id, selectedVoice);
       }
-
-      const data = await response.json();
       setGeneratedAudio(data.audioUrl);
       setSuccess('Audio generated successfully!');
     } catch (err) {
@@ -263,7 +286,7 @@ const VoiceChangerPage = () => {
         </Grid>
 
         <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 2, height: '100%' }}>
+          <Paper sx={{ p: 4, minHeight: 320, height: '100%', borderRadius: 4, boxShadow: 4, display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}>
             <Typography variant="h6" gutterBottom>
               Generated Audio
             </Typography>
@@ -271,9 +294,9 @@ const VoiceChangerPage = () => {
               <Box>
                 <audio
                   ref={setAudioPlayer}
-                  src={generatedAudio}
+                  src={getFileUrl(generatedAudio)}
                   controls
-                  style={{ width: '100%', marginBottom: 2 }}
+                  style={{ width: '100%', minHeight: 80, marginBottom: 24 }}
                 />
                 <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
                   <Tooltip title={isPlaying ? 'Stop' : 'Play'}>
@@ -286,7 +309,7 @@ const VoiceChangerPage = () => {
             ) : (
               <Box
                 sx={{
-                  height: 200,
+                  height: 180,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -299,6 +322,59 @@ const VoiceChangerPage = () => {
                 </Typography>
               </Box>
             )}
+            {/* Audio History Section */}
+            <Box sx={{ mt: 4 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 'bold', mb: 1 }}>
+                TTS History
+              </Typography>
+              {audioHistory.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">No TTS generated audios yet.</Typography>
+              ) : (
+                <Box sx={{ maxHeight: 250, overflowY: 'auto' }}>
+                  {audioHistory.map((audio) => (
+                    <Paper key={audio.id} sx={{ p: 1.5, mb: 1.5, borderRadius: 2, bgcolor: '#f5f5f5' }}>
+                      <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{audio.label || audio.name}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Voice: {audio.voice_id || 'N/A'} | File: {audio.name} <br/>
+                        {audio.created_at ? new Date(audio.created_at).toLocaleString() : ''}
+                      </Typography>
+                      <audio
+                        src={getFileUrl(audio.url || audio.path)}
+                        controls
+                        style={{ width: '100%', marginTop: 6 }}
+                      />
+                    </Paper>
+                  ))}
+                </Box>
+              )}
+            </Box>
+
+            {/* STS History Section */}
+            <Box sx={{ mt: 4 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 'bold', mb: 1 }}>
+                STS History
+              </Typography>
+              {stsHistory.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">No STS generated audios yet.</Typography>
+              ) : (
+                <Box sx={{ maxHeight: 250, overflowY: 'auto' }}>
+                  {stsHistory.map((audio) => (
+                    <Paper key={audio.id} sx={{ p: 1.5, mb: 1.5, borderRadius: 2, bgcolor: '#f5f5f5' }}>
+                      <Typography variant="body2" sx={{ fontWeight: 'bold' }}>{audio.label || audio.name}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Voice: {audio.voice_id || 'N/A'} | File: {audio.name} <br/>
+                        {audio.created_at ? new Date(audio.created_at).toLocaleString() : ''}
+                      </Typography>
+                      <audio
+                        src={getFileUrl(audio.url || audio.path)}
+                        controls
+                        style={{ width: '100%', marginTop: 6 }}
+                      />
+                    </Paper>
+                  ))}
+                </Box>
+              )}
+            </Box>
           </Paper>
         </Grid>
       </Grid>

@@ -60,7 +60,7 @@ class STSGenerator:
             audio.export(temp_mp3_path, format="mp3")
             
             # Prepare the API request
-            url = f"{self.base_url}/voice-conversion/{target_voice_id}"
+            url = f"{self.base_url}/speech-to-speech/{target_voice_id}"
             
             headers = {
                 "Accept": "audio/mpeg",
