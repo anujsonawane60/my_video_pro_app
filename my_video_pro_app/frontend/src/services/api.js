@@ -262,4 +262,110 @@ export const generateSTS = async (jobId, audioId, voiceId) => {
   }
 };
 
+// Final Video Creation API functions
+export const getProjectAudioFiles = async (projectId) => {
+  try {
+    const response = await api.get(`/available-audio/${projectId}`);
+    return response.data.available_audio || [];
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const getProjectSubtitleFiles = async (projectId) => {
+  try {
+    const response = await api.get(`/available-subtitles/${projectId}`);
+    return response.data.available_subtitles || [];
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const createProjectFinalVideo = async (projectId, data) => {
+  try {
+    console.log('Creating final video with data:', data);
+    const formData = new FormData();
+    
+    // Ensure we have valid IDs
+    if (!data.audioFile?.id) {
+      throw new Error('Audio file ID is required');
+    }
+    if (!data.subtitleFile?.id) {
+      throw new Error('Subtitle file ID is required');
+    }
+    
+    formData.append('audio_file_id', data.audioFile.id);
+    formData.append('subtitle_file_id', data.subtitleFile.id);
+    
+    // Ensure subtitle style is properly formatted
+    const subtitleStyle = {
+      fontFamily: data.subtitleStyle?.fontFamily || 'Arial',
+      fontSize: data.subtitleStyle?.fontSize || 24,
+      color: data.subtitleStyle?.color || '#FFFFFF'
+    };
+    
+    formData.append('subtitle_style', JSON.stringify(subtitleStyle));
+    
+    console.log('Sending form data:', {
+      audio_file_id: data.audioFile.id,
+      subtitle_file_id: data.subtitleFile.id,
+      subtitle_style: subtitleStyle
+    });
+    
+    const response = await api.post(`/create-final-video/${projectId}`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    
+    console.log('Final video creation response:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error('Error in createProjectFinalVideo:', error);
+    if (error.response) {
+      throw new Error(error.response.data.detail || 'Failed to create final video');
+    }
+    throw error;
+  }
+};
+
+export const getProjectVideoStatus = async (projectId, jobId) => {
+  try {
+    if (!jobId) {
+      throw new Error('Job ID is required');
+    }
+    console.log(`Checking video status for project ${projectId}, job ${jobId}`);
+    const response = await api.get(`/job-status/${jobId}`);
+    console.log('Video status response:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error('Error in getProjectVideoStatus:', error);
+    if (error.response) {
+      throw new Error(error.response.data.detail || 'Failed to get video status');
+    }
+    throw error;
+  }
+};
+
+export const downloadProjectVideo = async (projectId, videoId) => {
+  try {
+    const response = await api.get(`/download/${projectId}/final-video`, {
+      responseType: 'blob'
+    });
+    return response.data;
+  } catch (error) {
+    throw error;
+  }
+};
+
+export const getProjectVideoHistory = async (projectId) => {
+    try {
+        const response = await api.get(`/projects/${projectId}/video-history`);
+        return response.data;
+    } catch (error) {
+        console.error('Error fetching video history:', error);
+        throw error;
+    }
+};
+
 export default api; 

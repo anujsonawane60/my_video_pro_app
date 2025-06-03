@@ -30,6 +30,9 @@ from models import Job, JobStep, Subtitle, AudioFile
 from config import UPLOAD_DIR, OUTPUT_DIR
 from tts_generator import TTSGenerator
 from sts_generator import STSGenerator
+from video_creator import VideoCreator
+import logging
+from pydantic import BaseModel
 
 # Load environment variables from .env file
 load_dotenv()
@@ -96,6 +99,11 @@ app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 # Initialize TTS and STS generators
 tts_generator = TTSGenerator()
 sts_generator = STSGenerator()
+
+class SubtitleStyle(BaseModel):
+    fontFamily: str
+    fontSize: int
+    color: str
 
 @app.get("/")
 async def read_root():
@@ -982,6 +990,147 @@ async def generate_sts(
         }
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/create-final-video/{job_id}")
+async def create_final_video(
+    job_id: str,
+    audio_file_id: str = Form(..., description="ID of the audio file to use"),
+    subtitle_file_id: str = Form(..., description="ID of the subtitle file to use"),
+    subtitle_style: str = Form(..., description="JSON string containing subtitle styling options"),
+    db: Session = Depends(get_db)
+):
+    """Create final video with custom subtitles and audio."""
+    try:
+        logging.info(f"Received request to create final video for job {job_id}")
+        logging.info(f"Audio file ID: {audio_file_id}")
+        logging.info(f"Subtitle file ID: {subtitle_file_id}")
+        logging.info(f"Raw subtitle style: {subtitle_style}")
+        
+        # Validate job
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            logging.error(f"Job {job_id} not found")
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        # Update job status to processing
+        job.status = "processing"
+        job.current_step = "create_final_video"
+        db.commit()
+        
+        # Validate audio file
+        audio_file = db.query(AudioFile).filter(AudioFile.id == audio_file_id).first()
+        if not audio_file:
+            logging.error(f"Audio file {audio_file_id} not found")
+            raise HTTPException(status_code=404, detail="Audio file not found")
+        
+        # Validate subtitle file
+        subtitle_file = db.query(Subtitle).filter(Subtitle.id == subtitle_file_id).first()
+        if not subtitle_file:
+            logging.error(f"Subtitle file {subtitle_file_id} not found")
+            raise HTTPException(status_code=404, detail="Subtitle file not found")
+        
+        # Validate file paths
+        if not os.path.exists(audio_file.file_path):
+            logging.error(f"Audio file path does not exist: {audio_file.file_path}")
+            raise HTTPException(status_code=404, detail="Audio file not found on disk")
+        if not os.path.exists(subtitle_file.file_path):
+            logging.error(f"Subtitle file path does not exist: {subtitle_file.file_path}")
+            raise HTTPException(status_code=404, detail="Subtitle file not found on disk")
+        if not os.path.exists(job.video_path):
+            logging.error(f"Video file path does not exist: {job.video_path}")
+            raise HTTPException(status_code=404, detail="Original video file not found on disk")
+        
+        # Parse and validate subtitle style
+        try:
+            style_dict = json.loads(subtitle_style)
+            # Validate required fields
+            if not all(key in style_dict for key in ['fontFamily', 'fontSize', 'color']):
+                raise ValueError("Missing required subtitle style fields")
+            
+            # Convert to Pydantic model for validation
+            style = SubtitleStyle(
+                fontFamily=str(style_dict['fontFamily']),
+                fontSize=int(style_dict['fontSize']),
+                color=str(style_dict['color'])
+            )
+            logging.info(f"Validated subtitle style: {style.dict()}")
+        except json.JSONDecodeError as e:
+            logging.error(f"Invalid subtitle style JSON: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid subtitle style JSON format")
+        except ValueError as e:
+            logging.error(f"Invalid subtitle style data: {str(e)}")
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # Create video creator instance
+        project_dir = os.path.join(OUTPUT_DIR, str(job_id))
+        os.makedirs(project_dir, exist_ok=True)
+        creator = VideoCreator(project_dir)
+        
+        try:
+            # Create final video
+            logging.info("Calling VideoCreator.create_final_video")
+            output_path = creator.create_final_video(
+                video_path=job.video_path,
+                audio_path=audio_file.file_path,
+                subtitle_path=subtitle_file.file_path,
+                subtitle_style=style.dict()
+            )
+            logging.info(f"VideoCreator.create_final_video returned output_path: {output_path}")
+            
+            # Update job status
+            job.status = "completed"
+            job.final_video_path = output_path
+            logging.info("Attempting to commit job status and final_video_path to database")
+            db.commit()
+            
+            logging.info(f"Final video created successfully at: {output_path}")
+            return {
+                "status": "success",
+                "message": "Final video created successfully",
+                "job_id": str(job.id),
+                "video_path": output_path
+            }
+            
+        except Exception as e:
+            logging.error(f"Error in video creation process: {str(e)}", exc_info=True)
+            job.status = "failed"
+            job.error_message = str(e)
+            db.commit()
+            raise HTTPException(status_code=500, detail=f"Error creating video: {str(e)}")
+        finally:
+            creator.cleanup()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Unexpected error in create_final_video: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/projects/{project_id}/video-history")
+async def get_project_video_history(project_id: str, db: Session = Depends(get_db)):
+    try:
+        # Get all jobs for this project that have a final video
+        jobs = db.query(Job).filter(
+            Job.id == project_id,
+            Job.final_video_path.isnot(None)
+        ).order_by(Job.created_at.desc()).all()
+        
+        # Format the response
+        video_history = []
+        for job in jobs:
+            if job.final_video_path and os.path.exists(job.final_video_path):
+                relative_path = f"/outputs/{job.id}/{os.path.basename(job.final_video_path)}"
+                video_history.append({
+                    "id": str(job.id),
+                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "url": relative_path,
+                    "status": job.status
+                })
+        
+        return video_history
+    except Exception as e:
+        logging.error(f"Error fetching video history: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

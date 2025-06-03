@@ -5,6 +5,7 @@ import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import SubtitlesIcon from '@mui/icons-material/Subtitles';
 import TranslateIcon from '@mui/icons-material/Translate';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
+import MovieIcon from '@mui/icons-material/Movie';
 
 const modules = [
   {
@@ -30,6 +31,12 @@ const modules = [
     name: 'Translate Subtitle',
     description: 'Translate subtitles into different languages.',
     icon: <TranslateIcon fontSize="large" color="primary" />,
+  },
+  {
+    id: 'final-video',
+    name: 'Final Video Creation',
+    description: 'Create final video with custom subtitles and audio.',
+    icon: <MovieIcon fontSize="large" color="primary" />,
   },
 ];
 

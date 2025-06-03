@@ -27,6 +27,7 @@ class Job(Base):
     output_dir = Column(String(500))
     current_step = Column(String(50))
     error_message = Column(Text)
+    final_video_path = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     user = relationship('User', back_populates='jobs')
